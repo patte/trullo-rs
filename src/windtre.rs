@@ -36,9 +36,28 @@ fn parse_sms_message(message: &str, date_time: DateTime<Utc>) -> Option<DataStat
 }
 
 fn sms_date(sms: &Sms) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(&sms.timestamp)
-        .map(|dt| dt.with_timezone(&Utc))
-        .ok()
+    // Try RFC3339 timestamp if present
+    if let Some(ts) = &sms.timestamp {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+            return Some(dt.with_timezone(&Utc));
+        }
+    }
+    // Try 'received' field (might be RFC3339)
+    if let Some(ts) = &sms.received {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+            return Some(dt.with_timezone(&Utc));
+        }
+    }
+    // Try RouterOS 'time' format like "aug/17/2024 15:27:02"
+    if let Some(t) = &sms.time {
+        // Attempt parsing with a few known layouts
+        // Note: chrono doesn't have a built-in for mon/.. lowercase, normalize first
+        let norm = t.replace("Aug", "aug").replace("Sep", "sep");
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&norm, "%b/%d/%Y %H:%M:%S") {
+            return Some(chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
+    }
+    None
 }
 
 pub async fn most_recent_data_status() -> Result<Option<DataStatus>> {
@@ -50,6 +69,11 @@ pub async fn most_recent_data_status() -> Result<Option<DataStatus>> {
             if let Some(ds) = parse_sms_message(&sms.message, dt) {
                 return Ok(Some(ds));
             }
+        } else {
+            eprintln!(
+                "[windtre] could not parse date for SMS id={} from={:?}",
+                sms.id, sms.from
+            );
         }
     }
     Ok(None)

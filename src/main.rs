@@ -11,20 +11,10 @@ mod windtre;
 use once_cell::sync::OnceCell;
 #[cfg(feature = "server")]
 use std::sync::Arc;
-
-#[derive(Debug, Clone, Routable, PartialEq)]
-#[rustfmt::skip]
-enum Route {
-    #[layout(Navbar)]
-    #[route("/")]
-    Home {},
-    #[route("/blog/:id")]
-    Blog { id: i32 },
-}
+#[cfg(feature = "server")]
+use tokio::sync::RwLock;
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
-const MAIN_CSS: Asset = asset!("/assets/main.css");
-const HEADER_SVG: Asset = asset!("/assets/header.svg");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 fn main() {
@@ -34,137 +24,46 @@ fn main() {
 #[allow(non_snake_case)]
 #[component]
 fn App() -> Element {
-    // Ensure the server-side scheduler is started (no-op on wasm)
+    // Ensure the server-side scheduler is started (no-op on client)
     let _ = use_resource(|| async move {
         let _ = start_scheduler().await;
     });
     rsx! {
         document::Link { rel: "icon", href: FAVICON }
-        document::Link { rel: "stylesheet", href: MAIN_CSS } document::Link { rel: "stylesheet", href: TAILWIND_CSS }
-        Router::<Route> {}
-    }
-}
-
-#[allow(non_snake_case)]
-#[component]
-pub fn Hero() -> Element {
-    rsx! {
-        div {
-            id: "hero",
-            img { src: HEADER_SVG, id: "header" }
-            div { id: "links",
-                a { href: "https://dioxuslabs.com/learn/0.6/", "📚 Learn Dioxus" }
-                a { href: "https://dioxuslabs.com/awesome", "🚀 Awesome Dioxus" }
-                a { href: "https://github.com/dioxus-community/", "📡 Community Libraries" }
-                a { href: "https://github.com/DioxusLabs/sdk", "⚙️ Dioxus Development Kit" }
-                a { href: "https://marketplace.visualstudio.com/items?itemName=DioxusLabs.dioxus", "💫 VSCode Extension" }
-                a { href: "https://discord.gg/XgGxMSkvUM", "👋 Community Discord" }
-            }
-        }
-    }
-}
-
-/// Home page
-#[allow(non_snake_case)]
-#[component]
-fn Home() -> Element {
-    rsx! {
-        Hero {}
-        Echo {}
+        document::Stylesheet { href: TAILWIND_CSS }
         DataStatusView {}
     }
-}
-
-/// Blog page
-#[allow(non_snake_case)]
-#[component]
-pub fn Blog(id: i32) -> Element {
-    rsx! {
-        div {
-            id: "blog",
-
-            // Content
-            h1 { "This is blog #{id}!" }
-            p { "In blog #{id}, we show how the Dioxus router works and how URL parameters can be passed as props to our route components." }
-
-            // Navigation links
-            Link {
-                to: Route::Blog { id: id - 1 },
-                "Previous"
-            }
-            span { " <---> " }
-            Link {
-                to: Route::Blog { id: id + 1 },
-                "Next"
-            }
-        }
-    }
-}
-
-/// Shared navbar component.
-#[allow(non_snake_case)]
-#[component]
-fn Navbar() -> Element {
-    rsx! {
-        div {
-            id: "navbar",
-            Link {
-                to: Route::Home {},
-                "Home"
-            }
-            Link {
-                to: Route::Blog { id: 1 },
-                "Blog"
-            }
-        }
-
-        Outlet::<Route> {}
-    }
-}
-
-/// Echo component that demonstrates fullstack server functions.
-#[allow(non_snake_case)]
-#[component]
-fn Echo() -> Element {
-    let mut response = use_signal(|| String::new());
-
-    rsx! {
-        div {
-            id: "echo",
-            h4 { "ServerFn Echo" }
-            input {
-                placeholder: "Type here to echo...",
-                oninput:  move |event| async move {
-                    let data = echo_server(event.value()).await.unwrap();
-                    response.set(data);
-                },
-            }
-
-            if !response().is_empty() {
-                p {
-                    "Server echoed: "
-                    i { "{response}" }
-                }
-            }
-        }
-    }
-}
-
-/// Echo the user input on the server.
-#[server(EchoServer)]
-async fn echo_server(input: String) -> Result<String, ServerFnError> {
-    Ok(input)
 }
 
 // --- Scheduler & DB wiring (server only) ---
 #[cfg(feature = "server")]
 static STARTED: OnceCell<bool> = OnceCell::new();
+#[cfg(feature = "server")]
+static STATUS: OnceCell<Arc<RwLock<SchedulerState>>> = OnceCell::new();
+
+#[cfg(feature = "server")]
+#[derive(Debug, Clone, Default, Serialize)]
+struct SchedulerState {
+    started: bool,
+    db_url: String,
+    last_loop_at: Option<String>,
+    last_event: Option<String>,
+    last_error: Option<String>,
+}
 
 #[cfg(feature = "server")]
 async fn scheduler_task(db: Arc<db::Db>) {
     use chrono::{Duration, Timelike, Utc};
     use windtre::{get_data_status_fresh, DataStatus};
+    eprintln!("[scheduler] background task started");
     loop {
+        // mark loop start
+        #[cfg(feature = "server")]
+        if let Some(st) = STATUS.get() {
+            let mut s = st.write().await;
+            s.last_loop_at = Some(Utc::now().to_rfc3339());
+            s.last_event = Some("polling for data status".into());
+        }
         // attempt to refresh or get current
         let result = get_data_status_fresh(
             false,
@@ -173,18 +72,64 @@ async fn scheduler_task(db: Arc<db::Db>) {
             Duration::seconds(2),
         )
         .await;
-        if let Ok(windtre::GetDataStatusEvent::Fresh {
-            data_status:
-                DataStatus {
-                    remaining_percentage,
-                    remaining_data_mb,
-                    date_time,
-                },
-        }) = result
-        {
-            let _ = db
-                .insert_data_status(remaining_percentage, remaining_data_mb, date_time)
-                .await;
+        match result {
+            Ok(windtre::GetDataStatusEvent::Fresh {
+                data_status:
+                    DataStatus {
+                        remaining_percentage,
+                        remaining_data_mb,
+                        date_time,
+                    },
+            }) => {
+                eprintln!(
+                    "[scheduler] fresh data: {}% ({} MB) at {}",
+                    remaining_percentage, remaining_data_mb, date_time
+                );
+                if let Err(e) = db
+                    .insert_data_status(remaining_percentage, remaining_data_mb, date_time)
+                    .await
+                {
+                    eprintln!("[scheduler] db insert error: {e}");
+                    if let Some(st) = STATUS.get() {
+                        let mut w = st.write().await;
+                        w.last_error = Some(format!("db insert error: {e}"));
+                    }
+                } else {
+                    if let Some(st) = STATUS.get() {
+                        let mut w = st.write().await;
+                        w.last_event = Some("stored fresh data".into());
+                    }
+                }
+            }
+            Ok(windtre::GetDataStatusEvent::Loading {
+                data_status: _,
+                is_stale,
+            }) => {
+                eprintln!("[scheduler] loading... stale={}", is_stale);
+                if let Some(st) = STATUS.get() {
+                    let mut w = st.write().await;
+                    w.last_event = Some(format!("loading (stale={})", is_stale));
+                }
+            }
+            Ok(windtre::GetDataStatusEvent::Error {
+                error,
+                data_status: _,
+                is_stale,
+            }) => {
+                eprintln!("[scheduler] error: {} (stale={})", error, is_stale);
+                if let Some(st) = STATUS.get() {
+                    let mut w = st.write().await;
+                    w.last_error = Some(format!("{}", error));
+                    w.last_event = Some(format!("error (stale={})", is_stale));
+                }
+            }
+            Err(e) => {
+                eprintln!("[scheduler] unexpected error: {e}");
+                if let Some(st) = STATUS.get() {
+                    let mut w = st.write().await;
+                    w.last_error = Some(format!("unexpected error: {e}"));
+                }
+            }
         }
         // sleep until next hour
         let now = Utc::now();
@@ -209,6 +154,13 @@ async fn ensure_scheduler_started() -> anyhow::Result<()> {
     }
     dotenv().ok();
     let db_url = resolve_db_url();
+    // init status
+    let _ = STATUS.set(Arc::new(RwLock::new(SchedulerState {
+        started: true,
+        db_url: db_url.clone(),
+        ..Default::default()
+    })));
+    eprintln!("[scheduler] starting with DB: {}", db_url);
     let db = db::Db::connect(&db_url).await?;
     let db = Arc::new(db);
     let _ = STARTED.set(true);
@@ -274,6 +226,50 @@ async fn latest_data_status() -> Result<Option<DataStatusDto>, ServerFnError> {
     }
 }
 
+// Expose scheduler status to the frontend for diagnostics
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchedulerStatusDto {
+    started: bool,
+    db_url: String,
+    last_loop_at: Option<String>,
+    last_event: Option<String>,
+    last_error: Option<String>,
+}
+
+#[server(GetSchedulerStatus)]
+async fn get_scheduler_status() -> Result<SchedulerStatusDto, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        if let Some(st) = STATUS.get() {
+            let s = st.read().await.clone();
+            return Ok(SchedulerStatusDto {
+                started: s.started,
+                db_url: s.db_url,
+                last_loop_at: s.last_loop_at,
+                last_event: s.last_event,
+                last_error: s.last_error,
+            });
+        }
+        return Ok(SchedulerStatusDto {
+            started: false,
+            db_url: String::new(),
+            last_loop_at: None,
+            last_event: Some("not started".into()),
+            last_error: None,
+        });
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        Ok(SchedulerStatusDto {
+            started: false,
+            db_url: String::new(),
+            last_loop_at: None,
+            last_event: None,
+            last_error: None,
+        })
+    }
+}
+
 // Server-only helper: build a stable, writable sqlite URL and ensure parent dir exists
 #[cfg(feature = "server")]
 fn resolve_db_url() -> String {
@@ -303,18 +299,55 @@ fn DataStatusView() -> Element {
         start_scheduler().await.ok();
         latest_data_status().await.ok().flatten()
     });
+    let status = use_resource(|| async move { get_scheduler_status().await.ok() });
     rsx! {
-        div { id: "data-status",
-            h4 { "Latest Data Status" }
-            {
-                let data = latest.read_unchecked();
-                match &*data {
-                    Some(Some(ds)) => rsx! {
-                        p { "Remaining: {ds.remaining_percentage}% ({ds.remaining_data_mb} MB)" }
-                        p { "As of: {ds.date_time}" }
-                    },
-                    Some(None) => rsx! { p { "No data yet." } },
-                    None => rsx! { p { "Loading..." } },
+        // Full-screen container
+        div { class: "min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6",
+            // Card
+            div { class: "w-full max-w-xl rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm shadow-xl p-8 space-y-6",
+                h1 { class: "text-2xl font-semibold tracking-tight text-slate-200", "WindTre Data Status" }
+                {
+                    let data = latest.read_unchecked();
+                    match &*data {
+                        Some(Some(ds)) => rsx! {
+                            div { class: "flex flex-col items-center gap-3",
+                                // Big percentage
+                                div { class: "text-6xl font-bold text-emerald-400 tabular-nums", "{ds.remaining_percentage}%" }
+                                // MB remaining
+                                div { class: "text-lg text-slate-300", "{ds.remaining_data_mb} MB remaining" }
+                                // Timestamp
+                                div { class: "text-xs text-slate-400", "As of {ds.date_time}" }
+                            }
+                        },
+                        Some(None) => rsx! {
+                            div { class: "text-center text-slate-300",
+                                p { class: "text-lg", "No data yet" }
+                                p { class: "text-sm text-slate-400", "Awaiting SMS update from the router..." }
+                            }
+                        },
+                        None => rsx! {
+                            div { class: "animate-pulse space-y-3",
+                                div { class: "h-9 w-28 bg-slate-800 rounded" }
+                                div { class: "h-5 w-48 bg-slate-800 rounded" }
+                                div { class: "h-3 w-40 bg-slate-800 rounded" }
+                            }
+                        },
+                    }
+                }
+                // Diagnostics
+                {
+                    match &*status.read_unchecked() {
+                        Some(Some(st)) => rsx!{
+                            div { class: "pt-2 border-t border-slate-800 text-xs text-slate-400 space-y-1",
+                                if let Some(err) = &st.last_error { div { class: "text-red-400 text-sm font-medium", "Error: {err}" } }
+                                if let Some(ev) = &st.last_event { div { "Status: {ev}" } }
+                                if let Some(ts) = &st.last_loop_at { div { "Last loop: {ts}" } }
+                                div { class: "truncate", "DB: {st.db_url}" }
+                            }
+                        },
+                        Some(None) => rsx!{ div { class: "text-xs text-slate-500", "No status yet..." } },
+                        None => rsx!{ div { class: "text-xs text-slate-500", "Loading status..." } },
+                    }
                 }
             }
         }
