@@ -18,6 +18,31 @@ const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 fn main() {
+    // If invoked with CLI subcommands, handle them in server builds
+    #[cfg(feature = "server")]
+    {
+        use std::env;
+        let mut args = env::args();
+        let _bin = args.next();
+        if let Some(cmd) = args.next() {
+            if cmd == "gen-test-data" {
+                // optional: seed value in MB at start
+                let seed = args
+                    .next()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(10240);
+                // block_on small runtime
+                let rt = tokio::runtime::Runtime::new().expect("rt");
+                rt.block_on(async move {
+                    if let Err(e) = generate_test_data(seed).await {
+                        eprintln!("error generating test data: {e}");
+                        std::process::exit(1);
+                    }
+                });
+                return;
+            }
+        }
+    }
     dioxus::launch(App);
 }
 
@@ -31,7 +56,17 @@ fn App() -> Element {
     rsx! {
         document::Link { rel: "icon", href: FAVICON }
         document::Stylesheet { href: TAILWIND_CSS }
-        DataStatusView {}
+        // Page container
+        div { class: "min-h-screen bg-slate-950 text-slate-100 p-6 space-y-6",
+            // Centered card (max-w-xl)
+            div { class: "w-full max-w-xl mx-auto",
+                DataStatusCard {}
+            }
+            // Full-width chart section
+            div { class: "w-full max-w-6xl mx-auto",
+                UsageChartView {}
+            }
+        }
     }
 }
 
@@ -131,13 +166,13 @@ async fn scheduler_task(db: Arc<db::Db>) {
                 }
             }
         }
-        // sleep until next hour
+        // sleep until next iteration
         let now = Utc::now();
-        let next_hour = (now + Duration::hours(1))
+        let next_hour = (now + Duration::minutes(5))
             .with_minute(0)
             .and_then(|d| d.with_second(0))
             .and_then(|d| d.with_nanosecond(0))
-            .unwrap_or(now + Duration::hours(1));
+            .unwrap_or(now + Duration::minutes(5));
         let sleep_dur = (next_hour - now)
             .to_std()
             .unwrap_or(std::time::Duration::from_secs(3600));
@@ -294,17 +329,15 @@ fn resolve_db_url() -> String {
 
 #[allow(non_snake_case)]
 #[component]
-fn DataStatusView() -> Element {
+fn DataStatusCard() -> Element {
     let latest = use_resource(|| async move {
         start_scheduler().await.ok();
         latest_data_status().await.ok().flatten()
     });
     let status = use_resource(|| async move { get_scheduler_status().await.ok() });
     rsx! {
-        // Full-screen container
-        div { class: "min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6",
             // Card
-            div { class: "w-full max-w-xl rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm shadow-xl p-8 space-y-6",
+            div { class: "w-full rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm shadow-xl p-8 space-y-6",
                 h1 { class: "text-2xl font-semibold tracking-tight text-slate-200", "WindTre Data Status" }
                 {
                     let data = latest.read_unchecked();
@@ -359,7 +392,6 @@ fn DataStatusView() -> Element {
                     }
                 }
             }
-        }
     }
 }
 
@@ -466,4 +498,175 @@ fn Gauge(
             div { class: "absolute inset-0 grid place-items-center", {children} }
         }
     }
+}
+
+// --- Daily usage API and chart ---
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DailyUsagePointDto {
+    date: String, // yyyy-mm-dd
+    used_mb: i32, // usage within that day
+}
+
+#[server(GetDailyUsage)]
+async fn get_daily_usage() -> Result<Vec<DailyUsagePointDto>, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        use chrono::{Datelike, Duration, TimeZone, Utc};
+        use dotenvy::dotenv;
+        dotenv().ok();
+        let db_url = resolve_db_url();
+        let db = match db::Db::connect(&db_url).await {
+            Ok(db) => db,
+            Err(e) => {
+                eprintln!("get_daily_usage connect error: {e}");
+                return Ok(vec![]);
+            }
+        };
+
+        let since = Utc::now() - Duration::days(90);
+        let rows = match db.get_rows_since(since).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("get_daily_usage query error: {e}");
+                return Ok(vec![]);
+            }
+        };
+
+        // Group by day and compute daily usage as positive decreases in remaining_data_mb
+        use std::collections::BTreeMap;
+        let mut by_day: BTreeMap<String, Vec<i32>> = BTreeMap::new();
+        for r in rows {
+            let day = r.date_time.date_naive().to_string();
+            by_day.entry(day).or_default().push(r.remaining_data_mb);
+        }
+        let mut out = Vec::new();
+        for (day, mut samples) in by_day {
+            if samples.is_empty() {
+                continue;
+            }
+            samples.sort(); // increasing values don't matter since we compute min-max
+            let max = samples.iter().copied().max().unwrap_or(0);
+            let min = samples.iter().copied().min().unwrap_or(0);
+            let used = (max - min).max(0);
+            out.push(DailyUsagePointDto {
+                date: day,
+                used_mb: used,
+            });
+        }
+        // Ensure we have consecutive days for the last 90 days, filling zeros where missing
+        let mut filled = Vec::new();
+        for i in (0..90).rev() {
+            let d = (Utc::now() - Duration::days(i)).date_naive().to_string();
+            if let Some(p) = out.iter().find(|p| p.date == d) {
+                filled.push(p.clone());
+            } else {
+                filled.push(DailyUsagePointDto {
+                    date: d,
+                    used_mb: 0,
+                });
+            }
+        }
+        return Ok(filled);
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        Ok(vec![])
+    }
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn UsageChartView() -> Element {
+    // Fetch data
+    let data = use_resource(|| async move { get_daily_usage().await.ok().unwrap_or_default() });
+    let points = data.read_unchecked().clone().unwrap_or_default();
+    // Visual params
+    let height = 180.0f32;
+    let padding = 20.0f32;
+    let bar_gap = 2.0f32;
+    let n = points.len().max(1) as f32;
+    let width = (n * (6.0 + bar_gap) + padding * 2.0).ceil();
+    let max_used = points.iter().map(|p| p.used_mb).max().unwrap_or(1) as f32;
+    let view_box = format!("0 0 {} {}", width, height + padding * 2.0);
+
+    // Month label iterator will track seen months internally
+    use std::collections::HashSet;
+
+    rsx! {
+        div { class: "rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm shadow-xl p-6 space-y-3",
+            div { class: "flex items-end justify-between",
+                h2 { class: "text-lg font-medium text-slate-200", "Daily usage (last 90 days)" }
+                if max_used > 0.0 { div { class: "text-xs text-slate-400", "Peak: {max_used as i32} MB" } }
+            }
+            div { class: "w-full overflow-x-auto",
+                svg { class: "block min-w-full", view_box: "{view_box}", width: "100%", height: "{(height + padding*2.0).to_string()}",
+                    // subtle grid
+                    line { x1: "{padding}", y1: "{padding}", x2: "{width - padding}", y2: "{padding}", stroke: "#1f2937", stroke_width: "1" }
+                    line { x1: "{padding}", y1: "{padding + height}", x2: "{width - padding}", y2: "{padding + height}", stroke: "#1f2937", stroke_width: "1" }
+                    {
+                        points.iter().enumerate().map(|(i, p)| {
+                            let x = padding + (i as f32) * (6.0 + bar_gap);
+                            let h = if max_used <= 0.0 { 0.0 } else { (p.used_mb as f32) / max_used * height };
+                            let y = padding + (height - h);
+                            let cls = if p.used_mb == 0 { "text-slate-800" } else { "text-emerald-400/80" };
+                            rsx!{ rect { key: "{i}", class: "{cls}", x: "{x}", y: "{y}", width: "6", height: "{h}", fill: "currentColor", rx: "2" } }
+                        })
+                    }
+                    {
+                        points
+                            .iter()
+                            .enumerate()
+                            .scan(HashSet::<String>::new(), |printed, (i, p)| {
+                                if p.date.len() >= 7 {
+                                    let m = &p.date[..7];
+                                    if printed.insert(m.to_string()) {
+                                        let x = padding + (i as f32) * (6.0 + bar_gap);
+                                        let node = rsx!{ text { x: "{x}", y: "{height + padding + 14.0}", class: "text-slate-400 fill-current text-[10px]", "{m}" } };
+                                        return Some(Some(node));
+                                    }
+                                }
+                                Some(None)
+                            })
+                            .filter_map(|x| x)
+                    }
+                }
+            }
+            div { class: "text-xs text-slate-500", "Tip: bars are scaled to the highest day; zeros are hidden in a muted tone." }
+        }
+    }
+}
+
+// --- Test data generator (server) ---
+#[cfg(feature = "server")]
+async fn generate_test_data(initial_remaining_mb: i32) -> anyhow::Result<()> {
+    use chrono::{Duration, Utc};
+    use dotenvy::dotenv;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    dotenv().ok();
+    let db_url = resolve_db_url();
+    let db = db::Db::connect(&db_url).await?;
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut remaining = initial_remaining_mb.max(1000);
+    let start = Utc::now() - Duration::days(90);
+    let mut t = start;
+    while t < Utc::now() {
+        // 1-3 samples per day at random times
+        let samples = rng.gen_range(1..=3);
+        let mut day_time = t;
+        for _ in 0..samples {
+            let drop = rng.gen_range(0..=200); // up to 200 MB between samples
+            if remaining > drop {
+                remaining -= drop;
+            }
+            let pct = ((remaining as f32) / (initial_remaining_mb as f32) * 100.0).round() as i32;
+            let _ = db
+                .insert_data_status(pct.clamp(0, 100), remaining.max(0), day_time)
+                .await?;
+            day_time += Duration::hours(rng.gen_range(4..=18));
+        }
+        t += Duration::days(1);
+    }
+    eprintln!("Inserted synthetic data from {} to now", start);
+    Ok(())
 }

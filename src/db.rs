@@ -97,4 +97,39 @@ impl Db {
             Ok(None)
         }
     }
+
+    pub async fn get_rows_since(&self, since: DateTime<Utc>) -> Result<Vec<DataStatusRow>> {
+        let rows = sqlx::query(
+            r#"SELECT id, remaining_percentage, remaining_data_mb, date_time, created_at
+            FROM data_status
+            WHERE date_time >= ?1
+            ORDER BY date_time ASC"#,
+        )
+        .bind(since.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let id: i64 = r.try_get("id")?;
+            let remaining_percentage: i32 = r.try_get("remaining_percentage")?;
+            let remaining_data_mb: i32 = r.try_get("remaining_data_mb")?;
+            let date_time_str: String = r.try_get("date_time")?;
+            let created_at_str: String = r.try_get("created_at")?;
+
+            let date_time =
+                DateTime::parse_from_rfc3339(&date_time_str).map(|dt| dt.with_timezone(&Utc))?;
+            let created_at =
+                DateTime::parse_from_rfc3339(&created_at_str).map(|dt| dt.with_timezone(&Utc))?;
+
+            out.push(DataStatusRow {
+                id,
+                remaining_percentage,
+                remaining_data_mb,
+                date_time,
+                created_at,
+            });
+        }
+        Ok(out)
+    }
 }
