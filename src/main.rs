@@ -414,7 +414,7 @@ fn DataStatusCard() -> Element {
                                     div { class: "text-5xl font-bold text-emerald-400 tabular-nums", "{ds.remaining_percentage}%" }
                                 }
                                 // MB remaining
-                                div { class: "text-lg text-slate-300", "{ds.remaining_data_mb} MB remaining" }
+                                div { class: "text-lg text-slate-300", "{format_megabytes(ds.remaining_data_mb)} remaining" }
                                 // Timestamp formatted in local time
                                 div { class: "text-xs text-slate-400", "As of {format_local(&ds.date_time)}" }
                             }
@@ -490,6 +490,34 @@ fn format_local(rfc3339: &str) -> String {
 #[cfg(not(all(feature = "web")))]
 fn format_local(rfc3339: &str) -> String {
     rfc3339.to_string()
+}
+
+// Human-readable size formatting for megabytes (SI units: 1000 MB = 1 GB)
+fn format_megabytes(mb: i32) -> String {
+    if mb.abs() >= 1_000 {
+        let gb = mb as f64 / 1_000.0;
+        if (gb.fract()).abs() < f64::EPSILON || (gb * 10.0).round() % 10.0 == 0.0 {
+            // Near integer or first decimal is 0 -> no decimal
+            format!("{} GB", gb.round() as i32)
+        } else {
+            format!("{:.1} GB", gb)
+        }
+    } else {
+        format!("{} MB", mb)
+    }
+}
+
+fn format_megabytes_f32(mb: f32) -> String {
+    if mb.abs() >= 1_000.0 {
+        let gb = mb as f64 / 1_000.0;
+        if (gb.fract()).abs() < f64::EPSILON || (gb * 10.0).round() % 10.0 == 0.0 {
+            format!("{} GB", gb.round() as i32)
+        } else {
+            format!("{:.1} GB", gb)
+        }
+    } else {
+        format!("{} MB", mb.round() as i32)
+    }
 }
 
 // --- Reusable SVG Gauge component ---
@@ -687,7 +715,7 @@ fn UsageChartView() -> Element {
         div { class: "rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm shadow-xl p-6 space-y-3",
             div { class: "flex items-end justify-between",
                 h2 { class: "text-lg font-medium text-slate-200", "Daily usage (last 90 days)" }
-                if max_used > 0.0 { div { class: "text-xs text-slate-400", "Peak: {max_used as i32} MB" } }
+                    if max_used > 0.0 { div { class: "text-xs text-slate-400", "Peak: {format_megabytes_f32(max_used)}" } }
             }
             div { class: "w-full overflow-x-auto",
                 svg { class: "block min-w-full", view_box: "{view_box}", width: "100%", height: "{(height + padding*2.0).to_string()}",
@@ -728,7 +756,7 @@ fn UsageChartView() -> Element {
                                 let y = padding + (height - h);
                                 // Dynamic width based on text length; two-line content to avoid overflow
                                 let date_label = fmt_date(&p.date);
-                                let value_label = format!("{} MB", p.used_mb);
+                                let value_label = format!("{}", format_megabytes(p.used_mb));
                                 let cw = 7.0f32; // approx char width at 11px
                                 let content_w = (date_label.len().max(value_label.len()) as f32) * cw + 12.0; // padding
                                 let tip_w = content_w.max(12.0).min(width - padding * 2.0);
