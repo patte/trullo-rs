@@ -67,7 +67,7 @@ async fn scheduler_task(db: Arc<db::Db>) {
         // attempt to refresh or get current
         let result = get_data_status_fresh(
             false,
-            Duration::minutes(75),
+            Duration::minutes(15),
             Duration::seconds(30),
             Duration::seconds(2),
         )
@@ -315,8 +315,8 @@ fn DataStatusView() -> Element {
                                 div { class: "text-6xl font-bold text-emerald-400 tabular-nums", "{ds.remaining_percentage}%" }
                                 // MB remaining
                                 div { class: "text-lg text-slate-300", "{ds.remaining_data_mb} MB remaining" }
-                                // Timestamp
-                                div { class: "text-xs text-slate-400", "As of {ds.date_time}" }
+                                // Timestamp formatted in local time
+                                div { class: "text-xs text-slate-400", "As of {format_local(&ds.date_time)} (local time)" }
                             }
                         },
                         Some(None) => rsx! {
@@ -341,8 +341,8 @@ fn DataStatusView() -> Element {
                             div { class: "pt-2 border-t border-slate-800 text-xs text-slate-400 space-y-1",
                                 if let Some(err) = &st.last_error { div { class: "text-red-400 text-sm font-medium", "Error: {err}" } }
                                 if let Some(ev) = &st.last_event { div { "Status: {ev}" } }
-                                if let Some(ts) = &st.last_loop_at { div { "Last loop: {ts}" } }
-                                div { class: "truncate", "DB: {st.db_url}" }
+                                if let Some(ts) = &st.last_loop_at { div { "Last loop: {format_local(ts)} (local)" } }
+                                // div { class: "truncate", "DB: {st.db_url}" }
                             }
                         },
                         Some(None) => rsx!{ div { class: "text-xs text-slate-500", "No status yet..." } },
@@ -352,4 +352,43 @@ fn DataStatusView() -> Element {
             }
         }
     }
+}
+
+// Format an RFC3339 date-time into local time "dd.mm.yyyy HH:MM"
+#[allow(unused)]
+fn pad2(n: i32) -> String {
+    if n < 10 {
+        format!("0{}", n)
+    } else {
+        n.to_string()
+    }
+}
+
+#[cfg(all(feature = "web"))]
+fn format_local(rfc3339: &str) -> String {
+    // Use JS Date to handle local timezone on the client
+    use js_sys::Date;
+    // Safari doesn't parse RFC3339 with timezone space; but our string is ISO 8601, so Date should handle
+    let d = Date::new(&wasm_bindgen::JsValue::from_str(rfc3339));
+    if d.get_time().is_nan() {
+        return rfc3339.to_string();
+    }
+    let day = d.get_date() as i32;
+    let month = (d.get_month() as i32) + 1;
+    let year = d.get_full_year() as i32;
+    let hour = d.get_hours() as i32;
+    let minute = d.get_minutes() as i32;
+    format!(
+        "{}.{}.{} {}:{}",
+        pad2(day),
+        pad2(month),
+        year,
+        pad2(hour),
+        pad2(minute)
+    )
+}
+
+#[cfg(not(all(feature = "web")))]
+fn format_local(rfc3339: &str) -> String {
+    rfc3339.to_string()
 }

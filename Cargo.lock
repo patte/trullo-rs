@@ -5424,6 +5424,7 @@ dependencies = [
  "chrono",
  "dioxus",
  "dotenvy",
+ "js-sys",
  "once_cell",
  "regex",
  "reqwest",
@@ -5431,6 +5432,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "wasm-bindgen",
 ]
 
 [[package]]
