@@ -1,6 +1,4 @@
-# Development
-
-Your new bare-bones project includes minimal organization with a single `main.rs` file and a few assets.
+# trullo 
 
 ```
 project/
@@ -27,8 +25,62 @@ Run the following command in the root of your project to start developing with t
 dx serve --platform web
 ```
 
-To run for a different platform, use the `--platform platform` flag. E.g.
+## Commands (server feature)
+
+This project also exposes a couple of CLI commands when built with the `server` feature. These commands interact with a local SQLite database and, for `import-sms`, a MikroTik router.
+
+### Build with server feature
+
 ```bash
-dx serve --platform desktop
+cargo build --no-default-features --features server
 ```
 
+The compiled binary will be at `target/debug/trullo-rs`.
+
+### Database location
+
+By default (when `DATABASE_URL` isn’t set), the app stores data in `data/data.db` under the project root. The URL used internally is of the form `sqlite:///abs/path/to/data.db?mode=rwc`. The `data/` directory is created automatically if it doesn’t exist.
+
+You can override the database location by setting `DATABASE_URL` (e.g., `sqlite:///absolute/path/to/your.db?mode=rwc`) in your environment or a `.env` file.
+
+### Environment variables for MikroTik (import-sms)
+
+`import-sms` needs access to your MikroTik’s REST API. Configure one of the following auth methods via environment variables (a `.env` file is supported):
+
+- Required:
+	- `MIKROTIK_URL` (e.g., `http://192.168.88.1`)
+- Authentication (choose one):
+	- `MIKROTIK_AUTH_BASE64` (contents of `base64(username:password)`)
+	- or `MIKROTIK_USER` and `MIKROTIK_PASSWORD` (or `MIKROTIK_PASS`)
+
+Example `.env`:
+
+```env
+MIKROTIK_URL=http://192.168.88.1
+MIKROTIK_USER=admin
+MIKROTIK_PASSWORD=yourpassword
+# DATABASE_URL=sqlite:///absolute/path/to/data.db?mode=rwc
+```
+
+### Commands
+
+- `gen-test-data [PLAN_TOTAL_MB]`
+	- Generates ~90 days of synthetic readings to the SQLite DB.
+	- `PLAN_TOTAL_MB` is optional (default: `102400` which is ~100 GB).
+	- Example:
+		```bash
+		target/debug/trullo-rs gen-test-data 204800
+		```
+
+- `import-sms`
+	- Fetches all SMS from the MikroTik inbox, parses WindTre data status messages, and inserts them into the DB.
+	- Duplicate records are ignored (uniqueness by timestamp).
+	- Example:
+		```bash
+		# Ensure .env contains MikroTik and optional DATABASE_URL
+		target/debug/trullo-rs import-sms
+		```
+
+Tips:
+- Both commands respect a `.env` file in the project root (via `dotenvy`).
+- Run with `RUST_LOG` or check stderr for progress messages.

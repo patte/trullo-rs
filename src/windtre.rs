@@ -84,6 +84,13 @@ pub async fn request_data_status_sms() -> Result<()> {
     send_sms("4155", "Dati").await
 }
 
+/// Parse a WindTre data status from a single Mikrotik SMS, if possible.
+/// Returns None if the SMS doesn't match the expected pattern or the date cannot be parsed.
+pub fn parse_data_status_from_sms(sms: &Sms) -> Option<DataStatus> {
+    let dt = sms_date(sms)?;
+    parse_sms_message(&sms.message, dt)
+}
+
 pub enum GetDataStatusEvent {
     Loading {
         data_status: Option<DataStatus>,

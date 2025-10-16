@@ -26,17 +26,75 @@ fn main() {
         let _bin = args.next();
         if let Some(cmd) = args.next() {
             if cmd == "gen-test-data" {
-                // optional: seed value in MB at start
-                let seed = args
+                // optional: plan total (MB). Default to 100 GB per story
+                let plan_total_mb = args
                     .next()
                     .and_then(|s| s.parse::<i32>().ok())
-                    .unwrap_or(10240);
+                    .unwrap_or(102_400);
                 // block_on small runtime
                 let rt = tokio::runtime::Runtime::new().expect("rt");
                 rt.block_on(async move {
-                    if let Err(e) = generate_test_data(seed).await {
+                    if let Err(e) = generate_test_data(plan_total_mb).await {
                         eprintln!("error generating test data: {e}");
                         std::process::exit(1);
+                    }
+                });
+                return;
+            }
+            if cmd == "import-sms" {
+                // Import all Mikrotik SMS that look like WindTre data status into the DB
+                let rt = tokio::runtime::Runtime::new().expect("rt");
+                rt.block_on(async move {
+                    use dotenvy::dotenv;
+                    dotenv().ok();
+                    let db_url = resolve_db_url();
+                    match db::Db::connect(&db_url).await {
+                        Ok(db) => {
+                            match mikrotik::get_smses().await {
+                                Ok(smss) => {
+                                    let mut total = 0usize;
+                                    let mut inserted = 0usize;
+                                    for sms in smss.iter() {
+                                        total += 1;
+                                        if let Some(ds) = windtre::parse_data_status_from_sms(sms) {
+                                            match db
+                                                .insert_data_status(
+                                                    ds.remaining_percentage,
+                                                    ds.remaining_data_mb,
+                                                    ds.date_time,
+                                                )
+                                                .await
+                                            {
+                                                Ok(_rowid) => {
+                                                    // rowid will be 0 on IGNORE; we still count as processed, not necessarily inserted
+                                                    if _rowid != 0 {
+                                                        inserted += 1;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "import-sms: db insert error for {}: {}",
+                                                        ds.date_time, e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    eprintln!(
+                                        "import-sms: processed {} SMS, inserted {} new records",
+                                        total, inserted
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("import-sms: failed to fetch SMS: {e}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("import-sms: failed to connect DB: {e}");
+                            std::process::exit(1);
+                        }
                     }
                 });
                 return;
@@ -525,7 +583,7 @@ async fn get_daily_usage() -> Result<Vec<DailyUsagePointDto>, ServerFnError> {
         };
 
         let since = Utc::now() - Duration::days(90);
-        let rows = match db.get_rows_since(since).await {
+        let mut rows = match db.get_rows_since(since).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("get_daily_usage query error: {e}");
@@ -533,39 +591,60 @@ async fn get_daily_usage() -> Result<Vec<DailyUsagePointDto>, ServerFnError> {
             }
         };
 
-        // Group by day and compute daily usage as positive decreases in remaining_data_mb
+        // Sort rows by timestamp ascending to make choosing the last sample per day easy
+        rows.sort_by_key(|r| r.date_time);
+
+        // For each day, keep the LAST reading (latest timestamp) of remaining_data_mb
         use std::collections::BTreeMap;
-        let mut by_day: BTreeMap<String, Vec<i32>> = BTreeMap::new();
-        for r in rows {
+        let mut last_by_day: BTreeMap<String, (chrono::DateTime<Utc>, i32)> = BTreeMap::new();
+        for r in rows.into_iter() {
             let day = r.date_time.date_naive().to_string();
-            by_day.entry(day).or_default().push(r.remaining_data_mb);
-        }
-        let mut out = Vec::new();
-        for (day, mut samples) in by_day {
-            if samples.is_empty() {
-                continue;
+            match last_by_day.get(&day) {
+                Some((ts, _)) if r.date_time <= *ts => {
+                    // keep existing (we want the last of the day)
+                }
+                _ => {
+                    last_by_day.insert(day, (r.date_time, r.remaining_data_mb));
+                }
             }
-            samples.sort(); // increasing values don't matter since we compute min-max
-            let max = samples.iter().copied().max().unwrap_or(0);
-            let min = samples.iter().copied().min().unwrap_or(0);
-            let used = (max - min).max(0);
-            out.push(DailyUsagePointDto {
-                date: day,
-                used_mb: used,
-            });
         }
-        // Ensure we have consecutive days for the last 90 days, filling zeros where missing
+
+        // Build output for last 90 days in order, computing usage as prev_day_remaining - curr_day_remaining when both exist
         let mut filled = Vec::new();
+        let mut prev_remaining: Option<i32> = None;
         for i in (0..90).rev() {
             let d = (Utc::now() - Duration::days(i)).date_naive().to_string();
-            if let Some(p) = out.iter().find(|p| p.date == d) {
-                filled.push(p.clone());
+            let curr_remaining = last_by_day.get(&d).map(|(_, v)| *v);
+            let used = match (prev_remaining, curr_remaining) {
+                (Some(prev), Some(curr)) => {
+                    let diff = prev - curr;
+                    if diff > 0 {
+                        diff
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            };
+            if let Some(curr) = curr_remaining {
+                // eprintln!(
+                //     "get_daily_usage: {d}: prev={} curr={} used={}",
+                //     prev_remaining.unwrap_or(-1),
+                //     curr,
+                //     used
+                // );
+                prev_remaining = Some(curr);
             } else {
-                filled.push(DailyUsagePointDto {
-                    date: d,
-                    used_mb: 0,
-                });
+                // eprintln!(
+                //     "get_daily_usage: {d}: prev={} curr=NA used=0",
+                //     prev_remaining.unwrap_or(-1)
+                // );
+                // do not update prev_remaining when there's no reading for this day
             }
+            filled.push(DailyUsagePointDto {
+                date: d,
+                used_mb: used,
+            });
         }
         return Ok(filled);
     }
@@ -581,6 +660,8 @@ fn UsageChartView() -> Element {
     // Fetch data
     let data = use_resource(|| async move { get_daily_usage().await.ok().unwrap_or_default() });
     let points = data.read_unchecked().clone().unwrap_or_default();
+    // Hovered bar index (for tooltip)
+    let mut hovered = use_signal(|| Option::<usize>::None);
     // Visual params
     let height = 180.0f32;
     let padding = 20.0f32;
@@ -589,6 +670,15 @@ fn UsageChartView() -> Element {
     let width = (n * (6.0 + bar_gap) + padding * 2.0).ceil();
     let max_used = points.iter().map(|p| p.used_mb).max().unwrap_or(1) as f32;
     let view_box = format!("0 0 {} {}", width, height + padding * 2.0);
+
+    // Date formatter for tooltip (yyyy-mm-dd -> dd.mm.yyyy)
+    let fmt_date = |s: &str| -> String {
+        if s.len() >= 10 {
+            format!("{}.{}.{}", &s[8..10], &s[5..7], &s[0..4])
+        } else {
+            s.to_string()
+        }
+    };
 
     // Month label iterator will track seen months internally
     use std::collections::HashSet;
@@ -610,8 +700,54 @@ fn UsageChartView() -> Element {
                             let h = if max_used <= 0.0 { 0.0 } else { (p.used_mb as f32) / max_used * height };
                             let y = padding + (height - h);
                             let cls = if p.used_mb == 0 { "text-slate-800" } else { "text-emerald-400/80" };
-                            rsx!{ rect { key: "{i}", class: "{cls}", x: "{x}", y: "{y}", width: "6", height: "{h}", fill: "currentColor", rx: "2" } }
+                            rsx!{
+                                rect {
+                                    key: "{i}",
+                                    class: "{cls}",
+                                    x: "{x}",
+                                    y: "{y}",
+                                    width: "6",
+                                    height: "{h}",
+                                    fill: "currentColor",
+                                    rx: "2",
+                                    onmouseenter: move |_| *hovered.write() = Some(i),
+                                    onmouseleave: move |_| *hovered.write() = None,
+                                    ontouchstart: move |_| *hovered.write() = Some(i),
+                                    ontouchend: move |_| *hovered.write() = None,
+                                }
+                            }
                         })
+                    }
+                    {
+                        // SVG tooltip overlay when hovering a bar
+                        match *hovered.read() {
+                            Some(i) => {
+                                let p = &points[i];
+                                let x = padding + (i as f32) * (6.0 + bar_gap) + 3.0; // center of bar
+                                let h = if max_used <= 0.0 { 0.0 } else { (p.used_mb as f32) / max_used * height };
+                                let y = padding + (height - h);
+                                // Dynamic width based on text length; two-line content to avoid overflow
+                                let date_label = fmt_date(&p.date);
+                                let value_label = format!("{} MB", p.used_mb);
+                                let cw = 7.0f32; // approx char width at 11px
+                                let content_w = (date_label.len().max(value_label.len()) as f32) * cw + 12.0; // padding
+                                let tip_w = content_w.max(12.0).min(width - padding * 2.0);
+                                let tip_h = 36.0f32; // two lines
+                                let tip_x = (x - tip_w / 2.0).clamp(padding, (width - padding) - tip_w);
+                                let tip_y = (y - 10.0 - tip_h).max(6.0);
+                                rsx!{
+                                    g { key: "tooltip",
+                                        // connector
+                                        line { x1: "{x}", y1: "{y}", x2: "{x}", y2: "{tip_y + tip_h}", stroke: "#10b981", stroke_width: "1" }
+                                        // bubble
+                                        rect { x: "{tip_x}", y: "{tip_y}", width: "{tip_w}", height: "{tip_h}", rx: "6", fill: "#0f172a", stroke: "#334155", stroke_width: "1" }
+                                        text { x: "{tip_x + 8.0}", y: "{tip_y + 16.0}", class: "fill-current text-[11px] text-slate-300", "{date_label}" }
+                                        text { x: "{tip_x + 8.0}", y: "{tip_y + 30.0}", class: "fill-current text-[11px] text-slate-200", "{value_label}" }
+                                    }
+                                }
+                            }
+                            None => rsx!{ Fragment {} }
+                        }
                     }
                     {
                         points
@@ -639,34 +775,126 @@ fn UsageChartView() -> Element {
 
 // --- Test data generator (server) ---
 #[cfg(feature = "server")]
-async fn generate_test_data(initial_remaining_mb: i32) -> anyhow::Result<()> {
-    use chrono::{Duration, Utc};
+async fn generate_test_data(plan_total_mb: i32) -> anyhow::Result<()> {
+    use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
     use dotenvy::dotenv;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     dotenv().ok();
     let db_url = resolve_db_url();
     let db = db::Db::connect(&db_url).await?;
     let mut rng = StdRng::seed_from_u64(42);
-    let mut remaining = initial_remaining_mb.max(1000);
-    let start = Utc::now() - Duration::days(90);
-    let mut t = start;
-    while t < Utc::now() {
-        // 1-3 samples per day at random times
-        let samples = rng.gen_range(1..=3);
-        let mut day_time = t;
-        for _ in 0..samples {
-            let drop = rng.gen_range(0..=200); // up to 200 MB between samples
-            if remaining > drop {
-                remaining -= drop;
+
+    // Total monthly allowance (e.g., 100 GB)
+    let total = plan_total_mb.max(1024 * 10); // ensure at least 10 GB
+
+    let now = Utc::now();
+    let mut day = (now - Duration::days(90)).date_naive();
+    let end_day = now.date_naive();
+
+    // Choose a plausible starting remaining if we're mid-month; else start full on the 1st
+    let mut remaining: i32 = if day.day() == 1 {
+        total
+    } else {
+        // Start somewhere between 30% and 100% of the plan
+        rng.gen_range((total as f32 * 0.3) as i32..=total)
+    };
+
+    while day <= end_day {
+        let day_start = NaiveDateTime::new(day, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        let mut sample_times: Vec<chrono::DateTime<Utc>> = Vec::new();
+
+        // Monthly reset at the very start of each calendar month
+        if day.day() == 1 {
+            remaining = total;
+            let reset_min = rng.gen_range(0..=29);
+            let reset_sec = rng.gen_range(0..=59);
+            let reset_naive = day
+                .and_hms_opt(0, reset_min, reset_sec)
+                .expect("valid midnight time");
+            let reset_dt = chrono::DateTime::<Utc>::from_naive_utc_and_offset(reset_naive, Utc);
+            // Record the reset reading (100%)
+            let pct = ((remaining as f32) / (total as f32) * 100.0).round() as i32;
+            if reset_dt <= now {
+                let _ = db
+                    .insert_data_status(pct.clamp(0, 100), remaining, reset_dt)
+                    .await?;
             }
-            let pct = ((remaining as f32) / (initial_remaining_mb as f32) * 100.0).round() as i32;
-            let _ = db
-                .insert_data_status(pct.clamp(0, 100), remaining.max(0), day_time)
-                .await?;
-            day_time += Duration::hours(rng.gen_range(4..=18));
+            // Ensure subsequent samples come after the reset
         }
-        t += Duration::days(1);
+
+        // Decide number of samples for the day (scheduler would run ~hourly; we simulate a few observations)
+        let k: usize = rng.gen_range(1..=3);
+        // Generate monotonically increasing times during the day
+        let mut last_hour: u32 = if day.day() == 1 { 1 } else { 0 };
+        for _ in 0..k {
+            // Leave some space for the remaining samples
+            let remaining_slots = k - sample_times.len();
+            let max_hour_cap = 23u32.saturating_sub((remaining_slots as u32 - 1) * 2);
+            let hour = rng.gen_range(last_hour..=max_hour_cap.max(last_hour));
+            let minute = rng.gen_range(0..=59);
+            let second = rng.gen_range(0..=59);
+            last_hour = hour.saturating_add(2).min(23);
+            let naive = day
+                .and_hms_opt(hour, minute, second)
+                .expect("valid time for day");
+            let ts = chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+            sample_times.push(ts);
+        }
+
+        // Determine daily usage profile (MB)
+        let roll: u8 = rng.gen_range(0..100);
+        let mut daily_usage_mb: i32 = if roll < 55 {
+            // light day: 0–2 GB
+            rng.gen_range(0..=2_000)
+        } else if roll < 85 {
+            // moderate: 2–5 GB
+            rng.gen_range(2_000..=5_000)
+        } else if roll < 98 {
+            // heavy: 5–8 GB
+            rng.gen_range(5_000..=8_000)
+        } else {
+            // extreme: 8–10 GB
+            rng.gen_range(8_000..=10_240)
+        };
+        // Can't use more than we have remaining
+        if daily_usage_mb > remaining {
+            daily_usage_mb = remaining;
+        }
+
+        // Spread daily usage across the k samples
+        let mut remaining_usage = daily_usage_mb;
+        for (i, ts) in sample_times.into_iter().enumerate() {
+            if ts > now {
+                // Don't create future samples for today
+                continue;
+            }
+            let drop_i: i32 = if i + 1 == k {
+                remaining_usage
+            } else {
+                // up to an even share of what's left, with some variance
+                let even_share = (remaining_usage / ((k - i) as i32)).max(0);
+                rng.gen_range(0..=even_share)
+            };
+            remaining_usage = remaining_usage.saturating_sub(drop_i);
+            remaining = remaining.saturating_sub(drop_i);
+
+            let pct = ((remaining as f32) / (total as f32) * 100.0).round() as i32;
+            let _ = db
+                .insert_data_status(pct.clamp(0, 100), remaining, ts)
+                .await?;
+        }
+
+        // Advance one day safely (compatible with chrono 0.4)
+        if let Some(next) = day.checked_add_signed(chrono::Duration::days(1)) {
+            day = next;
+        } else {
+            break;
+        }
     }
-    eprintln!("Inserted synthetic data from {} to now", start);
+
+    eprintln!(
+        "Inserted synthetic data for ~90 days ending at {} (monthly reset to {} MB)",
+        end_day, total
+    );
     Ok(())
 }
