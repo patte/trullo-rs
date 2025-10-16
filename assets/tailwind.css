@@ -27,6 +27,8 @@
     --text-lg--line-height: calc(1.75 / 1.125);
     --text-2xl: 1.5rem;
     --text-2xl--line-height: calc(2 / 1.5);
+    --text-5xl: 3rem;
+    --text-5xl--line-height: 1;
     --text-6xl: 3.75rem;
     --text-6xl--line-height: 1;
     --font-weight-medium: 500;
@@ -195,8 +197,14 @@
   .absolute {
     position: absolute;
   }
+  .relative {
+    position: relative;
+  }
   .static {
     position: static;
+  }
+  .inset-0 {
+    inset: calc(var(--spacing) * 0);
   }
   .container {
     width: 100%;
@@ -218,6 +226,9 @@
   }
   .flex {
     display: flex;
+  }
+  .grid {
+    display: grid;
   }
   .table {
     display: table;
@@ -257,6 +268,9 @@
   }
   .flex-col {
     flex-direction: column;
+  }
+  .place-items-center {
+    place-items: center;
   }
   .items-center {
     align-items: center;
@@ -338,6 +352,10 @@
     font-size: var(--text-2xl);
     line-height: var(--tw-leading, var(--text-2xl--line-height));
   }
+  .text-5xl {
+    font-size: var(--text-5xl);
+    line-height: var(--tw-leading, var(--text-5xl--line-height));
+  }
   .text-6xl {
     font-size: var(--text-6xl);
     line-height: var(--tw-leading, var(--text-6xl--line-height));
@@ -390,6 +408,9 @@
   }
   .text-slate-500 {
     color: var(--color-slate-500);
+  }
+  .text-slate-800 {
+    color: var(--color-slate-800);
   }
   .tabular-nums {
     --tw-numeric-spacing: tabular-nums;
