@@ -416,7 +416,7 @@ fn DataStatusCard() -> Element {
                                 // MB remaining
                                 div { class: "text-lg text-slate-300", "{ds.remaining_data_mb} MB remaining" }
                                 // Timestamp formatted in local time
-                                div { class: "text-xs text-slate-400", "As of {format_local(&ds.date_time)} (local time)" }
+                                div { class: "text-xs text-slate-400", "As of {format_local(&ds.date_time)}" }
                             }
                         },
                         Some(None) => rsx! {
@@ -441,7 +441,7 @@ fn DataStatusCard() -> Element {
                             div { class: "pt-2 border-t border-slate-800 text-xs text-slate-400 space-y-1",
                                 if let Some(err) = &st.last_error { div { class: "text-red-400 text-sm font-medium", "Error: {err}" } }
                                 if let Some(ev) = &st.last_event { div { "Status: {ev}" } }
-                                if let Some(ts) = &st.last_loop_at { div { "Last loop: {format_local(ts)} (local)" } }
+                                if let Some(ts) = &st.last_loop_at { div { "Last loop: {format_local(ts)}" } }
                                 // div { class: "truncate", "DB: {st.db_url}" }
                             }
                         },
