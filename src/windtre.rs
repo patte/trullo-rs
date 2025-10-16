@@ -93,6 +93,7 @@ pub fn parse_data_status_from_sms(sms: &Sms) -> Option<DataStatus> {
 
 pub enum GetDataStatusEvent {
     Loading {
+        #[allow(dead_code)]
         data_status: Option<DataStatus>,
         is_stale: bool,
     },
@@ -101,6 +102,7 @@ pub enum GetDataStatusEvent {
     },
     Error {
         error: anyhow::Error,
+        #[allow(dead_code)]
         data_status: Option<DataStatus>,
         is_stale: bool,
     },

@@ -9,10 +9,12 @@ pub struct Db {
 
 #[derive(Debug, Clone)]
 pub struct DataStatusRow {
+    #[allow(dead_code)]
     pub id: i64,
     pub remaining_percentage: i32,
     pub remaining_data_mb: i32,
     pub date_time: DateTime<Utc>,
+    #[allow(dead_code)]
     pub created_at: DateTime<Utc>,
 }
 

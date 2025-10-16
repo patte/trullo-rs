@@ -23,10 +23,10 @@ fn auth_header() -> Result<String> {
         env::var("MIKROTIK_USER"),
         env::var("MIKROTIK_PASS").or_else(|_| env::var("MIKROTIK_PASSWORD")),
     ) {
-        Ok(format!(
-            "Basic {}",
-            base64::encode(format!("{}:{}", user, pass))
-        ))
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let creds = format!("{}:{}", user, pass);
+        let enc = STANDARD.encode(creds);
+        Ok(format!("Basic {}", enc))
     } else {
         Err(anyhow!(
             "Set MIKROTIK_AUTH_BASE64 or MIKROTIK_USER and MIKROTIK_PASSWORD (or MIKROTIK_PASS)"

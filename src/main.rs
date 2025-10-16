@@ -21,8 +21,7 @@ fn main() {
     // If invoked with CLI subcommands, handle them in server builds
     #[cfg(feature = "server")]
     {
-        use std::env;
-        let mut args = env::args();
+        let mut args = std::env::args();
         let _bin = args.next();
         if let Some(cmd) = args.next() {
             if cmd == "gen-test-data" {
@@ -241,7 +240,6 @@ async fn scheduler_task(db: Arc<db::Db>) {
 #[cfg(feature = "server")]
 async fn ensure_scheduler_started() -> anyhow::Result<()> {
     use dotenvy::dotenv;
-    use std::env;
     if STARTED.get().copied().unwrap_or(false) {
         return Ok(());
     }
@@ -289,7 +287,6 @@ async fn latest_data_status() -> Result<Option<DataStatusDto>, ServerFnError> {
     #[cfg(feature = "server")]
     {
         use dotenvy::dotenv;
-        use std::env;
         dotenv().ok();
         let db_url = resolve_db_url();
         match db::Db::connect(&db_url).await {
@@ -598,7 +595,7 @@ pub struct DailyUsagePointDto {
 async fn get_daily_usage() -> Result<Vec<DailyUsagePointDto>, ServerFnError> {
     #[cfg(feature = "server")]
     {
-        use chrono::{Datelike, Duration, TimeZone, Utc};
+        use chrono::{Duration, Utc};
         use dotenvy::dotenv;
         dotenv().ok();
         let db_url = resolve_db_url();
@@ -804,7 +801,7 @@ fn UsageChartView() -> Element {
 // --- Test data generator (server) ---
 #[cfg(feature = "server")]
 async fn generate_test_data(plan_total_mb: i32) -> anyhow::Result<()> {
-    use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
+    use chrono::{Datelike, Duration, Utc};
     use dotenvy::dotenv;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     dotenv().ok();
@@ -828,7 +825,7 @@ async fn generate_test_data(plan_total_mb: i32) -> anyhow::Result<()> {
     };
 
     while day <= end_day {
-        let day_start = NaiveDateTime::new(day, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        // let day_start = NaiveDateTime::new(day, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
         let mut sample_times: Vec<chrono::DateTime<Utc>> = Vec::new();
 
         // Monthly reset at the very start of each calendar month
