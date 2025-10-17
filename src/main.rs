@@ -10,6 +10,8 @@ mod windtre;
 #[cfg(feature = "server")]
 use once_cell::sync::OnceCell;
 #[cfg(feature = "server")]
+use std::future;
+#[cfg(feature = "server")]
 use std::sync::Arc;
 #[cfg(feature = "server")]
 use tokio::sync::RwLock;
@@ -119,15 +121,22 @@ fn main() {
             }
         }
 
-        // Ensure background scheduler starts at server boot (before serving requests)
-        {
-            let rt = tokio::runtime::Runtime::new().expect("rt");
-            rt.block_on(async move {
-                if let Err(e) = ensure_scheduler_started().await {
-                    eprintln!("[scheduler] failed to start at boot: {e}");
-                }
-            });
-        }
+        std::thread::Builder::new()
+            .name("scheduler-rt".into())
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("scheduler rt");
+                rt.block_on(async {
+                    if let Err(e) = ensure_scheduler_started().await {
+                        eprintln!("[scheduler] failed to start at boot: {e}");
+                    }
+                    // keep this runtime alive forever
+                    futures::future::pending::<()>().await;
+                });
+            })
+            .expect("spawn scheduler thread");
     }
     dioxus::launch(App);
 }
@@ -157,6 +166,8 @@ fn App() -> Element {
 static STARTED: OnceCell<bool> = OnceCell::new();
 #[cfg(feature = "server")]
 static STATUS: OnceCell<Arc<RwLock<SchedulerState>>> = OnceCell::new();
+#[cfg(feature = "server")]
+static SCHED_INTERVAL_MINUTES: u64 = 15;
 
 #[cfg(feature = "server")]
 #[derive(Debug, Clone, Default, Serialize)]
@@ -170,95 +181,122 @@ struct SchedulerState {
 
 #[cfg(feature = "server")]
 async fn scheduler_task(db: Arc<db::Db>) {
-    use chrono::{Duration, Timelike, Utc};
+    use chrono::{Duration as ChronoDuration, Timelike, Utc};
+    use tokio::time::{timeout, Duration, Instant};
     use windtre::{get_data_status_fresh, DataStatus};
+
     eprintln!("[scheduler] background task started");
+
+    // Run immediately on startup
+    if let Err(_elapsed) = timeout(Duration::from_secs(10), scheduler_run_once(&db)).await {
+        eprintln!("[scheduler] initial run timed out; continuing to schedule");
+    }
+
+    // Align to next boundary and schedule periodic ticks
+    let interval_secs = SCHED_INTERVAL_MINUTES * 60;
+    let now = Utc::now();
+    let secs_in_hour = (now.minute() as u64) * 60 + (now.second() as u64);
+    let rem = secs_in_hour % interval_secs;
+    let next_delay_secs = if rem == 0 {
+        interval_secs
+    } else {
+        interval_secs - rem
+    };
+    let mins_until = (next_delay_secs + 59) / 60; // round up to next full minute
+    eprintln!(
+        "[scheduler] next run in {} minute(s); cadence every {} minute(s)",
+        mins_until, SCHED_INTERVAL_MINUTES
+    );
+
+    let start = Instant::now() + Duration::from_secs(next_delay_secs);
+    let mut interval = tokio::time::interval_at(start, Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+
     loop {
-        // mark loop start
-        #[cfg(feature = "server")]
-        if let Some(st) = STATUS.get() {
-            let mut s = st.write().await;
-            s.last_loop_at = Some(Utc::now().to_rfc3339());
-            s.last_event = Some("polling for data status".into());
-        }
-        // attempt to refresh or get current
-        let result = get_data_status_fresh(
-            false,
-            Duration::minutes(15),
-            Duration::seconds(30),
-            Duration::seconds(2),
-        )
-        .await;
-        match result {
-            Ok(windtre::GetDataStatusEvent::Fresh {
-                data_status:
-                    DataStatus {
-                        remaining_percentage,
-                        remaining_data_mb,
-                        date_time,
-                    },
-            }) => {
-                eprintln!(
-                    "[scheduler] fresh data: {}% ({} MB) at {}",
-                    remaining_percentage, remaining_data_mb, date_time
-                );
-                if let Err(e) = db
-                    .insert_data_status(remaining_percentage, remaining_data_mb, date_time)
-                    .await
-                {
-                    eprintln!("[scheduler] db insert error: {e}");
-                    if let Some(st) = STATUS.get() {
-                        let mut w = st.write().await;
-                        w.last_error = Some(format!("db insert error: {e}"));
-                    }
-                } else {
-                    if let Some(st) = STATUS.get() {
-                        let mut w = st.write().await;
-                        w.last_event = Some("stored fresh data".into());
-                    }
-                }
-            }
-            Ok(windtre::GetDataStatusEvent::Loading {
-                data_status: _,
-                is_stale,
-            }) => {
-                eprintln!("[scheduler] loading... stale={}", is_stale);
+        interval.tick().await;
+        scheduler_run_once(&db).await;
+    }
+}
+
+#[cfg(feature = "server")]
+async fn scheduler_run_once(db: &Arc<db::Db>) {
+    eprintln!("[scheduler] run_once: start");
+    use chrono::{Duration as ChronoDuration, Utc};
+    use windtre::{get_data_status_fresh, DataStatus};
+
+    // mark loop start
+    if let Some(st) = STATUS.get() {
+        let mut s = st.write().await;
+        s.last_loop_at = Some(Utc::now().to_rfc3339());
+        s.last_event = Some("polling for data status".into());
+    }
+    // attempt to refresh or get current
+    let result = get_data_status_fresh(
+        false,
+        ChronoDuration::minutes(SCHED_INTERVAL_MINUTES as i64),
+        ChronoDuration::seconds(30),
+        ChronoDuration::seconds(2),
+    )
+    .await;
+    eprintln!("[scheduler] run_once: got result");
+    match result {
+        Ok(windtre::GetDataStatusEvent::Fresh {
+            data_status:
+                DataStatus {
+                    remaining_percentage,
+                    remaining_data_mb,
+                    date_time,
+                },
+        }) => {
+            eprintln!(
+                "[scheduler] fresh data: {}% ({} MB) at {}",
+                remaining_percentage, remaining_data_mb, date_time
+            );
+            if let Err(e) = db
+                .insert_data_status(remaining_percentage, remaining_data_mb, date_time)
+                .await
+            {
+                eprintln!("[scheduler] db insert error: {e}");
                 if let Some(st) = STATUS.get() {
                     let mut w = st.write().await;
-                    w.last_event = Some(format!("loading (stale={})", is_stale));
+                    w.last_error = Some(format!("db insert error: {e}"));
                 }
-            }
-            Ok(windtre::GetDataStatusEvent::Error {
-                error,
-                data_status: _,
-                is_stale,
-            }) => {
-                eprintln!("[scheduler] error: {} (stale={})", error, is_stale);
+            } else {
                 if let Some(st) = STATUS.get() {
                     let mut w = st.write().await;
-                    w.last_error = Some(format!("{}", error));
-                    w.last_event = Some(format!("error (stale={})", is_stale));
-                }
-            }
-            Err(e) => {
-                eprintln!("[scheduler] unexpected error: {e}");
-                if let Some(st) = STATUS.get() {
-                    let mut w = st.write().await;
-                    w.last_error = Some(format!("unexpected error: {e}"));
+                    w.last_event = Some("stored fresh data".into());
                 }
             }
         }
-        // sleep until next iteration
-        let now = Utc::now();
-        let next_hour = (now + Duration::minutes(5))
-            .with_minute(0)
-            .and_then(|d| d.with_second(0))
-            .and_then(|d| d.with_nanosecond(0))
-            .unwrap_or(now + Duration::minutes(5));
-        let sleep_dur = (next_hour - now)
-            .to_std()
-            .unwrap_or(std::time::Duration::from_secs(3600));
-        tokio::time::sleep(sleep_dur).await;
+        Ok(windtre::GetDataStatusEvent::Loading {
+            data_status: _,
+            is_stale,
+        }) => {
+            eprintln!("[scheduler] loading... stale={}", is_stale);
+            if let Some(st) = STATUS.get() {
+                let mut w = st.write().await;
+                w.last_event = Some(format!("loading (stale={})", is_stale));
+            }
+        }
+        Ok(windtre::GetDataStatusEvent::Error {
+            error,
+            data_status: _,
+            is_stale,
+        }) => {
+            eprintln!("[scheduler] error: {} (stale={})", error, is_stale);
+            if let Some(st) = STATUS.get() {
+                let mut w = st.write().await;
+                w.last_error = Some(format!("{}", error));
+                w.last_event = Some(format!("error (stale={})", is_stale));
+            }
+        }
+        Err(e) => {
+            eprintln!("[scheduler] unexpected error: {e}");
+            if let Some(st) = STATUS.get() {
+                let mut w = st.write().await;
+                w.last_error = Some(format!("unexpected error: {e}"));
+            }
+        }
     }
 }
 

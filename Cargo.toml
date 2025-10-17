@@ -38,6 +38,7 @@ rand = { version = "0.8", features = ["std", "std_rng"], optional = true }
 tracing-subscriber = { version = "0.3.20", features = [
   "env-filter",
 ], optional = true }
+futures = { version = "0.3.31", optional = true }
 
 [features]
 default = []
@@ -57,6 +58,7 @@ server = [
   "dep:regex",
   "dep:rand",
   "dep:tracing-subscriber",
+  "dep:futures",
 ]
 
 [profile]

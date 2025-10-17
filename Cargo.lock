@@ -5461,6 +5461,7 @@ dependencies = [
  "chrono",
  "dioxus",
  "dotenvy",
+ "futures",
  "js-sys",
  "once_cell",
  "rand 0.8.5",
