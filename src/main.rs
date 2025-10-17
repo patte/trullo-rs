@@ -118,6 +118,16 @@ fn main() {
                 return;
             }
         }
+
+        // Ensure background scheduler starts at server boot (before serving requests)
+        {
+            let rt = tokio::runtime::Runtime::new().expect("rt");
+            rt.block_on(async move {
+                if let Err(e) = ensure_scheduler_started().await {
+                    eprintln!("[scheduler] failed to start at boot: {e}");
+                }
+            });
+        }
     }
     dioxus::launch(App);
 }
@@ -125,10 +135,6 @@ fn main() {
 #[allow(non_snake_case)]
 #[component]
 fn App() -> Element {
-    // Ensure the server-side scheduler is started (no-op on client)
-    let _ = use_resource(|| async move {
-        let _ = start_scheduler().await;
-    });
     rsx! {
         document::Link { rel: "icon", href: FAVICON }
         document::Stylesheet { href: TAILWIND_CSS }
@@ -278,17 +284,7 @@ async fn ensure_scheduler_started() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[server(StartScheduler)]
-async fn start_scheduler() -> Result<(), ServerFnError> {
-    #[cfg(feature = "server")]
-    {
-        if let Err(e) = ensure_scheduler_started().await {
-            eprintln!("start_scheduler error: {e}");
-            // Don't fail the request; just log the error to avoid 500s in dev
-        }
-    }
-    Ok(())
-}
+// Removed StartScheduler server function; scheduler now starts at server boot
 
 // DataStatus DTO for client-side display
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -404,10 +400,7 @@ fn resolve_db_url() -> String {
 #[allow(non_snake_case)]
 #[component]
 fn DataStatusCard() -> Element {
-    let latest = use_resource(|| async move {
-        start_scheduler().await.ok();
-        latest_data_status().await.ok().flatten()
-    });
+    let latest = use_resource(|| async move { latest_data_status().await.ok().flatten() });
     let status = use_resource(|| async move { get_scheduler_status().await.ok() });
     rsx! {
             // Card
