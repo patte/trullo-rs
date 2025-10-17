@@ -4,6 +4,7 @@ use once_cell::sync::Lazy;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::error::Error as _;
 
 static CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
@@ -66,18 +67,55 @@ pub async fn fetch_mikrotik<T: for<'de> Deserialize<'de> + Send + 'static>(
     if let Some(b) = body {
         req = req.json(&b);
     }
-    let res = req
-        .send()
-        .await
-        .with_context(|| format!("sending {} {}", method_s, url))?;
+    let res = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            // Classify and print richer diagnostics for transport-level failures
+            eprintln!("[mikrotik] request error on {} {}: {}", method_s, url, e);
+            if e.is_timeout() {
+                eprintln!("[mikrotik] hint: request timed out (client timeout ~10s)");
+            }
+            if e.is_connect() {
+                eprintln!(
+                    "[mikrotik] hint: connection failed (DNS/route/refused/TLS). Check MIKROTIK_URL and network reachability"
+                );
+            }
+            if e.is_builder() {
+                eprintln!("[mikrotik] hint: request build error (invalid URL or headers)");
+            }
+            // Print error cause chain for deeper insight
+            let mut chain = Vec::new();
+            let mut src: Option<&dyn std::error::Error> = e.source();
+            while let Some(s) = src {
+                chain.push(s.to_string());
+                src = s.source();
+            }
+            if !chain.is_empty() {
+                eprintln!("[mikrotik] error chain: {}", chain.join(" -> "));
+            }
+            return Err(anyhow!("sending {} {}: {}", method_s, url, e));
+        }
+    };
     if !res.status().is_success() {
         let status = res.status();
+        let headers = res.headers().clone();
         let text = res.text().await.unwrap_or_default();
+        if let Some(www) = headers
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+        {
+            eprintln!("[mikrotik] WWW-Authenticate: {}", www);
+        }
         eprintln!(
             "[mikrotik] request failed: status={} body=\n{}",
             status, text
         );
-        return Err(anyhow!("Request failed {} {}", status, text));
+        return Err(anyhow!(
+            "{} {} failed with status {}",
+            method_s,
+            url,
+            status
+        ));
     }
     // Read body once to allow better error messages when JSON decoding fails
     let bytes = res
