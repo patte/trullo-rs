@@ -17,10 +17,29 @@ use tokio::sync::RwLock;
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
+#[cfg(feature = "server")]
+use tracing_subscriber::{fmt, prelude::*, util::SubscriberInitExt, EnvFilter};
+#[cfg(feature = "server")]
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            // app defaults + mute sqlx statements
+            "info,sqlx::query=off,sqlx::query::describe=off",
+        )
+    });
+
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(filter)
+        .init();
+}
+
 fn main() {
     // If invoked with CLI subcommands, handle them in server builds
     #[cfg(feature = "server")]
     {
+        init_tracing();
+
         let mut args = std::env::args();
         let _bin = args.next();
         if let Some(cmd) = args.next() {

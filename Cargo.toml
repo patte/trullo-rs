@@ -35,6 +35,9 @@ anyhow = { version = "1.0", optional = true }
 base64 = { version = "0.22", optional = true }
 regex = { version = "1", optional = true }
 rand = { version = "0.8", features = ["std", "std_rng"], optional = true }
+tracing-subscriber = { version = "0.3.20", features = [
+  "env-filter",
+], optional = true }
 
 [features]
 default = []
@@ -53,6 +56,7 @@ server = [
   "dep:base64",
   "dep:regex",
   "dep:rand",
+  "dep:tracing-subscriber",
 ]
 
 [profile]
