@@ -7,7 +7,7 @@ pub mod windtre;
 
 pub use crate::backend::db::GLOBAL_DB;
 pub use db::Db;
-pub use scheduler::{ensure_scheduler_started_with, SCHED_INTERVAL_MINUTES};
+pub use scheduler::ensure_scheduler_started_with;
 
 pub use tracing_subscriber::{fmt, prelude::*, util::SubscriberInitExt, EnvFilter};
 
