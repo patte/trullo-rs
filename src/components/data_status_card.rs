@@ -53,16 +53,16 @@ pub fn DataStatusCard() -> Element {
                 // Diagnostics
                 {
                     match &*status.read_unchecked() {
-                        Some(Some(st)) => rsx!{
+                        // Only render diagnostics when there's an error
+                        Some(Some(st)) if st.last_error.is_some() => rsx!{
                             div { class: "pt-2 border-t border-slate-800 text-xs text-slate-400 space-y-1",
                                 if let Some(err) = &st.last_error { div { class: "text-red-400 text-sm font-medium", "Error: {err}" } }
                                 if let Some(ev) = &st.last_event { div { "Status: {ev}" } }
                                 if let Some(ts) = &st.last_loop_at { div { "Last loop: {format_local(ts)}" } }
-                                // div { class: "truncate", "DB: {st.db_url}" }
                             }
                         },
-                        Some(None) => rsx!{ div { class: "text-xs text-slate-500", "No status yet..." } },
-                        None => rsx!{ div { class: "text-xs text-slate-500", "Loading status..." } },
+                        // Otherwise render nothing
+                        _ => rsx!{ Fragment {} },
                     }
                 }
             }
