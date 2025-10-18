@@ -16,7 +16,7 @@ pub fn App() -> Element {
                 DataStatusCard {}
             }
             // Full-width chart section
-            div { class: "w-full max-w-6xl mx-auto",
+            div { class: "w-full max-w-5xl mx-auto",
                 UsageChartView {}
             }
         }
