@@ -15,6 +15,8 @@ use std::future;
 use std::sync::Arc;
 #[cfg(feature = "server")]
 use tokio::sync::RwLock;
+#[cfg(feature = "server")]
+static GLOBAL_DB: OnceCell<Arc<db::Db>> = OnceCell::new();
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
@@ -42,6 +44,25 @@ fn main() {
     {
         init_tracing();
 
+        // Initialize the global DB once at boot (before handling CLI)
+        {
+            use dotenvy::dotenv;
+            dotenv().ok();
+            let db_url = resolve_db_url();
+            let rt = tokio::runtime::Runtime::new().expect("rt");
+            rt.block_on(async {
+                match db::Db::connect(&db_url).await {
+                    Ok(db) => {
+                        let _ = GLOBAL_DB.set(Arc::new(db));
+                        eprintln!("[db] initialized");
+                    }
+                    Err(e) => {
+                        eprintln!("[db] failed to init: {e}");
+                    }
+                }
+            });
+        }
+
         let mut args = std::env::args();
         let _bin = args.next();
         if let Some(cmd) = args.next() {
@@ -54,7 +75,11 @@ fn main() {
                 // block_on small runtime
                 let rt = tokio::runtime::Runtime::new().expect("rt");
                 rt.block_on(async move {
-                    if let Err(e) = generate_test_data(plan_total_mb).await {
+                    let Some(db) = GLOBAL_DB.get() else {
+                        eprintln!("[gen-test-data] GLOBAL_DB not initialized");
+                        std::process::exit(1);
+                    };
+                    if let Err(e) = generate_test_data(db.clone(), plan_total_mb).await {
                         eprintln!("error generating test data: {e}");
                         std::process::exit(1);
                     }
@@ -65,54 +90,43 @@ fn main() {
                 // Import all Mikrotik SMS that look like WindTre data status into the DB
                 let rt = tokio::runtime::Runtime::new().expect("rt");
                 rt.block_on(async move {
-                    use dotenvy::dotenv;
-                    dotenv().ok();
-                    let db_url = resolve_db_url();
-                    match db::Db::connect(&db_url).await {
-                        Ok(db) => {
-                            match mikrotik::get_smses().await {
-                                Ok(smss) => {
-                                    let mut total = 0usize;
-                                    let mut inserted = 0usize;
-                                    for sms in smss.iter() {
-                                        total += 1;
-                                        if let Some(ds) = windtre::parse_data_status_from_sms(sms) {
-                                            match db
-                                                .insert_data_status(
-                                                    ds.remaining_percentage,
-                                                    ds.remaining_data_mb,
-                                                    ds.date_time,
-                                                )
-                                                .await
-                                            {
-                                                Ok(_rowid) => {
-                                                    // rowid will be 0 on IGNORE; we still count as processed, not necessarily inserted
-                                                    if _rowid != 0 {
-                                                        inserted += 1;
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    eprintln!(
-                                                        "import-sms: db insert error for {}: {}",
-                                                        ds.date_time, e
-                                                    );
-                                                }
+                    let Some(db) = GLOBAL_DB.get() else {
+                        eprintln!("[import-sms] GLOBAL_DB not initialized");
+                        std::process::exit(1);
+                    };
+                    match mikrotik::get_smses().await {
+                        Ok(smss) => {
+                            let mut total = 0usize;
+                            let mut inserted = 0usize;
+                            for sms in smss.iter() {
+                                total += 1;
+                                if let Some(ds) = windtre::parse_data_status_from_sms(sms) {
+                                    match db
+                                        .insert_data_status(
+                                            ds.remaining_percentage,
+                                            ds.remaining_data_mb,
+                                            ds.date_time,
+                                        )
+                                        .await
+                                    {
+                                        Ok(rowid) => {
+                                            if rowid != 0 {
+                                                inserted += 1;
                                             }
                                         }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "import-sms: db insert error for {}: {}",
+                                                ds.date_time, e
+                                            );
+                                        }
                                     }
-                                    eprintln!(
-                                        "import-sms: processed {} SMS, inserted {} new records",
-                                        total, inserted
-                                    );
-                                }
-                                Err(e) => {
-                                    eprintln!("import-sms: failed to fetch SMS: {e}");
-                                    std::process::exit(1);
                                 }
                             }
+                            eprintln!("import-sms: processed {}, inserted {}", total, inserted);
                         }
                         Err(e) => {
-                            eprintln!("import-sms: failed to connect DB: {e}");
+                            eprintln!("import-sms: failed to fetch SMS: {e}");
                             std::process::exit(1);
                         }
                     }
@@ -129,8 +143,12 @@ fn main() {
                     .build()
                     .expect("scheduler rt");
                 rt.block_on(async {
-                    if let Err(e) = ensure_scheduler_started().await {
-                        eprintln!("[scheduler] failed to start at boot: {e}");
+                    if let Some(db) = GLOBAL_DB.get() {
+                        if let Err(e) = ensure_scheduler_started_with(db.clone(), None).await {
+                            eprintln!("[scheduler] failed to start at boot: {e}");
+                        }
+                    } else {
+                        eprintln!("[scheduler] GLOBAL_DB not initialized; scheduler not started");
                     }
                     // keep this runtime alive forever
                     futures::future::pending::<()>().await;
@@ -301,13 +319,14 @@ async fn scheduler_run_once(db: &Arc<db::Db>) {
 }
 
 #[cfg(feature = "server")]
-async fn ensure_scheduler_started() -> anyhow::Result<()> {
-    use dotenvy::dotenv;
+async fn ensure_scheduler_started_with(
+    db: Arc<db::Db>,
+    db_url_for_status: Option<String>,
+) -> anyhow::Result<()> {
     if STARTED.get().copied().unwrap_or(false) {
         return Ok(());
     }
-    dotenv().ok();
-    let db_url = resolve_db_url();
+    let db_url = db_url_for_status.unwrap_or_else(|| "sqlite".to_string());
     // init status
     let _ = STATUS.set(Arc::new(RwLock::new(SchedulerState {
         started: true,
@@ -315,14 +334,10 @@ async fn ensure_scheduler_started() -> anyhow::Result<()> {
         ..Default::default()
     })));
     eprintln!("[scheduler] starting with DB: {}", db_url);
-    let db = db::Db::connect(&db_url).await?;
-    let db = Arc::new(db);
     let _ = STARTED.set(true);
     tokio::spawn(scheduler_task(db));
     Ok(())
 }
-
-// Removed StartScheduler server function; scheduler now starts at server boot
 
 // DataStatus DTO for client-side display
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -339,27 +354,20 @@ pub struct DataStatusDto {
 async fn latest_data_status() -> Result<Option<DataStatusDto>, ServerFnError> {
     #[cfg(feature = "server")]
     {
-        use dotenvy::dotenv;
-        dotenv().ok();
-        let db_url = resolve_db_url();
-        match db::Db::connect(&db_url).await {
-            Ok(db) => match db.get_latest_data_status().await {
-                Ok(Some(r)) => {
-                    return Ok(Some(DataStatusDto {
-                        remaining_percentage: r.remaining_percentage,
-                        remaining_data_mb: r.remaining_data_mb,
-                        date_time: r.date_time.to_rfc3339(),
-                    }))
-                }
-                Ok(None) => return Ok(None),
-                Err(e) => {
-                    eprintln!("latest_data_status query error: {e}");
-                    return Ok(None);
-                }
-            },
+        let Some(db) = GLOBAL_DB.get() else {
+            eprintln!("latest_data_status: DB not initialized");
+            return Ok(None);
+        };
+        match db.get_latest_data_status().await {
+            Ok(Some(r)) => Ok(Some(DataStatusDto {
+                remaining_percentage: r.remaining_percentage,
+                remaining_data_mb: r.remaining_data_mb,
+                date_time: r.date_time.to_rfc3339(),
+            })),
+            Ok(None) => Ok(None),
             Err(e) => {
-                eprintln!("latest_data_status connect error: {e}");
-                return Ok(None);
+                eprintln!("latest_data_status query error: {e}");
+                Ok(None)
             }
         }
     }
@@ -646,15 +654,9 @@ async fn get_daily_usage() -> Result<Vec<DailyUsagePointDto>, ServerFnError> {
     #[cfg(feature = "server")]
     {
         use chrono::{Duration, Utc};
-        use dotenvy::dotenv;
-        dotenv().ok();
-        let db_url = resolve_db_url();
-        let db = match db::Db::connect(&db_url).await {
-            Ok(db) => db,
-            Err(e) => {
-                eprintln!("get_daily_usage connect error: {e}");
-                return Ok(vec![]);
-            }
+        let Some(db) = GLOBAL_DB.get() else {
+            eprintln!("get_daily_usage: DB not initialized");
+            return Ok(vec![]);
         };
 
         let since = Utc::now() - Duration::days(90);
@@ -850,13 +852,11 @@ fn UsageChartView() -> Element {
 
 // --- Test data generator (server) ---
 #[cfg(feature = "server")]
-async fn generate_test_data(plan_total_mb: i32) -> anyhow::Result<()> {
+async fn generate_test_data(db: Arc<db::Db>, plan_total_mb: i32) -> anyhow::Result<()> {
     use chrono::{Datelike, Duration, Utc};
     use dotenvy::dotenv;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     dotenv().ok();
-    let db_url = resolve_db_url();
-    let db = db::Db::connect(&db_url).await?;
     let mut rng = StdRng::seed_from_u64(42);
 
     // Total monthly allowance (e.g., 100 GB)

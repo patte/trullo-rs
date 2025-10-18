@@ -1,6 +1,8 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub struct Db {
@@ -20,9 +22,17 @@ pub struct DataStatusRow {
 
 impl Db {
     pub async fn connect(database_url: &str) -> Result<Self> {
+        // Prefer connect options to set WAL, busy timeout, etc.
+        let opts = SqliteConnectOptions::from_str(database_url)?
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .foreign_keys(true);
+
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect(database_url)
+            .max_connections(3)
+            .connect_with(opts)
             .await?;
         let db = Self { pool };
         db.migrate().await?;
