@@ -18,6 +18,7 @@ pub struct SchedulerState {
     pub last_loop_at: Option<String>,
     pub last_event: Option<String>,
     pub last_error: Option<String>,
+    pub next_iteration_at: Option<String>,
 }
 
 pub async fn scheduler_task(db: Arc<db::Db>) {
@@ -27,6 +28,11 @@ pub async fn scheduler_task(db: Arc<db::Db>) {
     eprintln!("[scheduler] background task started");
     if let Err(_elapsed) = timeout(Duration::from_secs(10), scheduler_run_once(&db)).await {
         eprintln!("[scheduler] initial run timed out; continuing to schedule");
+        // set in status
+        if let Some(st) = STATUS.get() {
+            let mut w = st.write().await;
+            w.last_error = Some("initial run timed out".into());
+        }
     }
     let interval_secs = SCHED_INTERVAL_MINUTES * 60;
     let now = Utc::now();
@@ -38,16 +44,31 @@ pub async fn scheduler_task(db: Arc<db::Db>) {
         interval_secs - rem
     };
     let mins_until = (next_delay_secs + 59) / 60;
+    // Compute and store next iteration timestamp
+    let next_ts = (Utc::now() + chrono::Duration::seconds(next_delay_secs as i64)).to_rfc3339();
+    if let Some(st) = STATUS.get() {
+        let mut w = st.write().await;
+        w.next_iteration_at = Some(next_ts.clone());
+    }
     eprintln!(
         "[scheduler] next run in {} minute(s); cadence every {} minute(s)",
         mins_until, SCHED_INTERVAL_MINUTES
     );
     let start = Instant::now() + Duration::from_secs(next_delay_secs);
     let mut interval = tokio::time::interval_at(start, Duration::from_secs(interval_secs));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
+
+        // Run the scheduled task
         scheduler_run_once(&db).await;
+
+        // Update next_iteration_at for the following tick
+        if let Some(st) = STATUS.get() {
+            let mut w = st.write().await;
+            let next = Utc::now() + chrono::Duration::seconds(interval_secs as i64);
+            w.next_iteration_at = Some(next.to_rfc3339());
+        }
     }
 }
 

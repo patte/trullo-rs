@@ -8,8 +8,8 @@ use std::error::Error as _;
 
 static CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(2))
-        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(5))
         .build()
         .expect("client")
 });

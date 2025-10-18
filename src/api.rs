@@ -53,6 +53,7 @@ pub async fn get_scheduler_status() -> Result<SchedulerStatusDto, ServerFnError>
                 last_loop_at: s.last_loop_at,
                 last_event: s.last_event,
                 last_error: s.last_error,
+                next_iteration_at: s.next_iteration_at,
             });
         }
         return Ok(SchedulerStatusDto {
@@ -62,6 +63,7 @@ pub async fn get_scheduler_status() -> Result<SchedulerStatusDto, ServerFnError>
             last_loop_at: None,
             last_event: Some("not started".into()),
             last_error: None,
+            next_iteration_at: None,
         });
     }
     #[cfg(not(feature = "server"))]
@@ -73,6 +75,7 @@ pub async fn get_scheduler_status() -> Result<SchedulerStatusDto, ServerFnError>
             last_loop_at: None,
             last_event: None,
             last_error: None,
+            next_iteration_at: None,
         })
     }
 }

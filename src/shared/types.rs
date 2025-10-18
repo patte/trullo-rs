@@ -18,6 +18,7 @@ pub struct SchedulerStatusDto {
     pub last_loop_at: Option<String>,
     pub last_event: Option<String>,
     pub last_error: Option<String>,
+    pub next_iteration_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

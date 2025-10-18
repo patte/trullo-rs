@@ -1,5 +1,8 @@
 use dioxus::prelude::*;
 
+#[cfg(feature = "web")]
+use dioxus::logger::tracing::info;
+
 use crate::api::{get_scheduler_status, latest_data_status};
 use crate::components::Gauge;
 use crate::utils::format::{format_local, format_megabytes};
@@ -23,6 +26,76 @@ pub fn DataStatusCard() -> Element {
             let mut hydrated = hydrated.clone();
             move || {
                 hydrated.set(true); // runs once on the client after hydration
+            }
+        });
+    }
+
+    // ---------- NEW: client-side timer effect ----------
+    #[cfg(feature = "web")]
+    {
+        use gloo_timers::callback::{Interval, Timeout};
+        use js_sys::Date;
+        use wasm_bindgen::JsValue;
+
+        // Keep handles so we can cancel them on re-runs/unmount
+        let timer_handle: Signal<Option<Timeout>> = use_signal(|| None);
+
+        // teardown on unmount
+        use_drop({
+            let mut timer_handle = timer_handle.clone();
+            move || {
+                if let Some(h) = timer_handle.write().take() {
+                    h.cancel();
+                }
+            }
+        });
+
+        // refresh at next_iteration_at or poll every second
+        use_effect({
+            let mut status = status.clone();
+            let mut timer_handle = timer_handle.clone();
+
+            move || {
+                // Read resource *inside* the effect so it re-runs after restart()
+                let next_iso = status
+                    .read()
+                    .as_ref()
+                    .and_then(|s| s.as_ref())
+                    .and_then(|st| st.next_iteration_at.clone());
+
+                // Cancel any previous timeout before scheduling a new one
+                if let Some(prev) = timer_handle.write().take() {
+                    prev.cancel();
+                }
+
+                // Decide schedule based on next_iso:
+                // - Some future ts  -> one-shot to exact instant
+                // - Some past ts    -> 1s polling
+                // - None            -> 1s polling
+                let delay_ms = if let Some(next_str) = next_iso {
+                    let target_ms = Date::new(&JsValue::from_str(&next_str)).get_time();
+                    let now_ms = Date::now();
+                    if target_ms.is_finite() && target_ms > now_ms {
+                        (target_ms - now_ms) as u32
+                    } else {
+                        // Past or unparsable -> poll
+                        1_000
+                    }
+                } else {
+                    // No next_iteration_at -> poll
+                    1_000
+                };
+
+                info!(
+                    "[data_status_card] scheduling next fetch in {} ms",
+                    delay_ms
+                );
+
+                // Schedule the timeout (one-shot or poll tick)
+                let handle = Timeout::new(delay_ms, move || {
+                    status.restart(); // effect will re-run after the fetch settles
+                });
+                timer_handle.set(Some(handle));
             }
         });
     }
@@ -89,6 +162,7 @@ pub fn DataStatusCard() -> Element {
                             if let Some(err) = &st.last_error { div { class: "text-red-400 text-sm font-medium", "Error: {err}" } }
                             if let Some(ev) = &st.last_event { div { "Status: {ev}" } }
                             if let Some(ts) = &st.last_loop_at { div { "Last loop: {format_local(ts)}" } }
+                            if let Some(next_ts) = &st.next_iteration_at { div { "Next run: {format_local(next_ts)}" } }
                         }
                     },
                     _ => rsx!( Fragment {} ),
