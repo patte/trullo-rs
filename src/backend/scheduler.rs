@@ -5,10 +5,11 @@ use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+pub static SCHED_INTERVAL_MINUTES: u64 = 60;
+
 pub static SCHED_HANDLE: OnceCell<Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>> =
     OnceCell::new();
 pub static STATUS: OnceCell<Arc<RwLock<SchedulerState>>> = OnceCell::new();
-pub static SCHED_INTERVAL_MINUTES: u64 = 15;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SchedulerState {
@@ -61,7 +62,7 @@ pub async fn scheduler_run_once(db: &Arc<db::Db>) {
     }
     let result = get_data_status_fresh(
         false,
-        ChronoDuration::minutes(SCHED_INTERVAL_MINUTES as i64),
+        ChronoDuration::minutes((SCHED_INTERVAL_MINUTES - 1) as i64),
         ChronoDuration::seconds(30),
         ChronoDuration::seconds(2),
     )
@@ -76,8 +77,11 @@ pub async fn scheduler_run_once(db: &Arc<db::Db>) {
                 },
         }) => {
             eprintln!(
-                "[scheduler] fresh data: {}% ({} MB) at {}",
-                remaining_percentage, remaining_data_mb, date_time
+                "[scheduler] fresh data: {}% ({} MB) at {} (age: {} min)",
+                remaining_percentage,
+                remaining_data_mb,
+                date_time,
+                (Utc::now() - date_time).num_minutes()
             );
             if let Err(e) = db
                 .insert_data_status(remaining_percentage, remaining_data_mb, date_time)
