@@ -42,11 +42,11 @@ pub struct Sms {
     pub id: String,
     pub message: String,
     #[serde(default)]
-    pub timestamp: Option<String>, // Some firmware exposes RFC3339, but often it's missing
+    pub timestamp: Option<String>,
     #[serde(rename = "time")]
     pub time: Option<String>, // RouterOS time string e.g. "aug/17/2024 15:27:02"
     #[serde(rename = "received")]
-    pub received: Option<String>, // Sometimes present
+    pub received: Option<String>,
     #[serde(rename = "from")]
     pub from: Option<String>,
 }
@@ -71,7 +71,6 @@ pub async fn fetch_mikrotik<T: for<'de> Deserialize<'de> + Send + 'static>(
     let res = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            // Classify and print richer diagnostics for transport-level failures
             eprintln!("[mikrotik] request error on {} {}: {}", method_s, url, e);
             if e.is_timeout() {
                 eprintln!("[mikrotik] hint: request timed out (client timeout ~10s)");
@@ -84,7 +83,6 @@ pub async fn fetch_mikrotik<T: for<'de> Deserialize<'de> + Send + 'static>(
             if e.is_builder() {
                 eprintln!("[mikrotik] hint: request build error (invalid URL or headers)");
             }
-            // Print error cause chain for deeper insight
             let mut chain = Vec::new();
             let mut src: Option<&dyn std::error::Error> = e.source();
             while let Some(s) = src {
@@ -118,7 +116,6 @@ pub async fn fetch_mikrotik<T: for<'de> Deserialize<'de> + Send + 'static>(
             status
         ));
     }
-    // Read body once to allow better error messages when JSON decoding fails
     let bytes = res
         .bytes()
         .await

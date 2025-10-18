@@ -1,8 +1,33 @@
+#![cfg(feature = "server")]
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use once_cell::sync::OnceCell;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 use std::str::FromStr;
+use std::sync::Arc;
+
+pub static GLOBAL_DB: OnceCell<Arc<Db>> = OnceCell::new();
+
+pub fn resolve_db_url() -> String {
+    use std::{env, fs, path::PathBuf};
+    if let Ok(url) = env::var("DATABASE_URL") {
+        return url;
+    }
+    // Place DB under project_root/data/data.db
+    let root = env!("CARGO_MANIFEST_DIR");
+    let mut path = PathBuf::from(root);
+    path.push("data");
+    let _ = fs::create_dir_all(&path);
+    path.push("data.db");
+    // SQLx expects absolute paths in the form sqlite:///abs/path
+    let path_str = path.to_string_lossy();
+    let trimmed = path_str
+        .strip_prefix('/')
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path_str.to_string());
+    format!("sqlite:///{}?mode=rwc", trimmed)
+}
 
 #[derive(Debug, Clone)]
 pub struct Db {
@@ -22,7 +47,6 @@ pub struct DataStatusRow {
 
 impl Db {
     pub async fn connect(database_url: &str) -> Result<Self> {
-        // Prefer connect options to set WAL, busy timeout, etc.
         let opts = SqliteConnectOptions::from_str(database_url)?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
@@ -40,7 +64,6 @@ impl Db {
     }
 
     async fn migrate(&self) -> Result<()> {
-        // Create table if not exists
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS data_status (
