@@ -10,13 +10,13 @@ mod windtre;
 #[cfg(feature = "server")]
 use once_cell::sync::OnceCell;
 #[cfg(feature = "server")]
-use std::future;
-#[cfg(feature = "server")]
 use std::sync::Arc;
 #[cfg(feature = "server")]
 use tokio::sync::RwLock;
 #[cfg(feature = "server")]
 static GLOBAL_DB: OnceCell<Arc<db::Db>> = OnceCell::new();
+#[cfg(feature = "server")]
+static SCHED_HANDLE: OnceCell<Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>> = OnceCell::new();
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
@@ -39,16 +39,15 @@ fn init_tracing() {
 }
 
 fn main() {
-    // If invoked with CLI subcommands, handle them in server builds
     #[cfg(feature = "server")]
     {
         init_tracing();
 
-        // Initialize the global DB once at boot (before handling CLI)
+        // Initialize the global DB once at boot
+        let db_url = resolve_db_url();
         {
             use dotenvy::dotenv;
             dotenv().ok();
-            let db_url = resolve_db_url();
             let rt = tokio::runtime::Runtime::new().expect("rt");
             rt.block_on(async {
                 match db::Db::connect(&db_url).await {
@@ -144,7 +143,7 @@ fn main() {
                     .expect("scheduler rt");
                 rt.block_on(async {
                     if let Some(db) = GLOBAL_DB.get() {
-                        if let Err(e) = ensure_scheduler_started_with(db.clone(), None).await {
+                        if let Err(e) = ensure_scheduler_started_with(db.clone(), db_url).await {
                             eprintln!("[scheduler] failed to start at boot: {e}");
                         }
                     } else {
@@ -181,8 +180,6 @@ fn App() -> Element {
 
 // --- Scheduler & DB wiring (server only) ---
 #[cfg(feature = "server")]
-static STARTED: OnceCell<bool> = OnceCell::new();
-#[cfg(feature = "server")]
 static STATUS: OnceCell<Arc<RwLock<SchedulerState>>> = OnceCell::new();
 #[cfg(feature = "server")]
 static SCHED_INTERVAL_MINUTES: u64 = 15;
@@ -199,9 +196,8 @@ struct SchedulerState {
 
 #[cfg(feature = "server")]
 async fn scheduler_task(db: Arc<db::Db>) {
-    use chrono::{Duration as ChronoDuration, Timelike, Utc};
+    use chrono::{Timelike, Utc};
     use tokio::time::{timeout, Duration, Instant};
-    use windtre::{get_data_status_fresh, DataStatus};
 
     eprintln!("[scheduler] background task started");
 
@@ -238,7 +234,7 @@ async fn scheduler_task(db: Arc<db::Db>) {
 
 #[cfg(feature = "server")]
 async fn scheduler_run_once(db: &Arc<db::Db>) {
-    eprintln!("[scheduler] run_once: start");
+    eprintln!("[scheduler] run start");
     use chrono::{Duration as ChronoDuration, Utc};
     use windtre::{get_data_status_fresh, DataStatus};
 
@@ -256,7 +252,6 @@ async fn scheduler_run_once(db: &Arc<db::Db>) {
         ChronoDuration::seconds(2),
     )
     .await;
-    eprintln!("[scheduler] run_once: got result");
     match result {
         Ok(windtre::GetDataStatusEvent::Fresh {
             data_status:
@@ -316,26 +311,42 @@ async fn scheduler_run_once(db: &Arc<db::Db>) {
             }
         }
     }
+    eprintln!("[scheduler] run complete");
 }
 
 #[cfg(feature = "server")]
-async fn ensure_scheduler_started_with(
-    db: Arc<db::Db>,
-    db_url_for_status: Option<String>,
-) -> anyhow::Result<()> {
-    if STARTED.get().copied().unwrap_or(false) {
-        return Ok(());
+async fn ensure_scheduler_started_with(db: Arc<db::Db>, db_url: String) -> anyhow::Result<()> {
+    // Ensure we have a place to store the handle
+    let handle_cell = SCHED_HANDLE.get_or_init(|| Arc::new(RwLock::new(None)));
+    // If there's already a running handle, don't start again
+    {
+        let h_opt = handle_cell.read().await;
+        if let Some(h) = &*h_opt {
+            if !h.is_finished() {
+                return Ok(());
+            }
+        }
     }
-    let db_url = db_url_for_status.unwrap_or_else(|| "sqlite".to_string());
-    // init status
-    let _ = STATUS.set(Arc::new(RwLock::new(SchedulerState {
-        started: true,
-        db_url: db_url.clone(),
-        ..Default::default()
-    })));
+    // Initialize STATUS once (before spawning) so the first run can record diagnostics
+    if STATUS.get().is_none() {
+        let _ = STATUS.set(Arc::new(RwLock::new(SchedulerState {
+            started: false,
+            db_url: db_url.clone(),
+            ..Default::default()
+        })));
+    }
     eprintln!("[scheduler] starting with DB: {}", db_url);
-    let _ = STARTED.set(true);
-    tokio::spawn(scheduler_task(db));
+    let handle = tokio::spawn(scheduler_task(db));
+    // Store/replace the handle for liveness tracking
+    {
+        let mut h_opt = handle_cell.write().await;
+        *h_opt = Some(handle);
+    }
+    // Mark as started after spawning
+    if let Some(st) = STATUS.get() {
+        let mut w = st.write().await;
+        w.started = true;
+    }
     Ok(())
 }
 
@@ -381,6 +392,7 @@ async fn latest_data_status() -> Result<Option<DataStatusDto>, ServerFnError> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchedulerStatusDto {
     started: bool,
+    running: bool,
     db_url: String,
     last_loop_at: Option<String>,
     last_event: Option<String>,
@@ -393,8 +405,16 @@ async fn get_scheduler_status() -> Result<SchedulerStatusDto, ServerFnError> {
     {
         if let Some(st) = STATUS.get() {
             let s = st.read().await.clone();
+            // Derive true running status from the join handle, if present
+            let running = if let Some(hcell) = SCHED_HANDLE.get() {
+                let h = hcell.read().await;
+                h.as_ref().map(|j| !j.is_finished()).unwrap_or(false)
+            } else {
+                false
+            };
             return Ok(SchedulerStatusDto {
                 started: s.started,
+                running,
                 db_url: s.db_url,
                 last_loop_at: s.last_loop_at,
                 last_event: s.last_event,
@@ -403,6 +423,7 @@ async fn get_scheduler_status() -> Result<SchedulerStatusDto, ServerFnError> {
         }
         return Ok(SchedulerStatusDto {
             started: false,
+            running: false,
             db_url: String::new(),
             last_loop_at: None,
             last_event: Some("not started".into()),
@@ -413,6 +434,7 @@ async fn get_scheduler_status() -> Result<SchedulerStatusDto, ServerFnError> {
     {
         Ok(SchedulerStatusDto {
             started: false,
+            running: false,
             db_url: String::new(),
             last_loop_at: None,
             last_event: None,
