@@ -791,7 +791,7 @@ fn UsageChartView() -> Element {
             div { class: "w-full overflow-x-auto",
                 svg { class: "block min-w-full", view_box: "{view_box}", width: "100%", height: "{(height + padding*2.0).to_string()}",
                     // subtle grid
-                    line { x1: "{padding}", y1: "{padding}", x2: "{width - padding}", y2: "{padding}", stroke: "#1f2937", stroke_width: "1" }
+                    // line { x1: "{padding}", y1: "{padding}", x2: "{width - padding}", y2: "{padding}", stroke: "#1f2937", stroke_width: "1" }
                     line { x1: "{padding}", y1: "{padding + height}", x2: "{width - padding}", y2: "{padding + height}", stroke: "#1f2937", stroke_width: "1" }
                     {
                         points.iter().enumerate().map(|(i, p)| {
@@ -867,7 +867,6 @@ fn UsageChartView() -> Element {
                     }
                 }
             }
-            div { class: "text-xs text-slate-500", "Tip: bars are scaled to the highest day; zeros are hidden in a muted tone." }
         }
     }
 }
