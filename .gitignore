@@ -11,3 +11,5 @@ node_modules
 data/
 
 .env
+
+copy-to-rpi

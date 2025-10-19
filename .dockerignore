@@ -1,0 +1,9 @@
+node_modules
+**/target
+**/dist
+data
+.vscode
+LICENSES
+LICENSE
+temp
+README.md

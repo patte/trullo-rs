@@ -1,14 +1,15 @@
-# trullo 
+# trullo-rs
 
-```
-project/
-├─ assets/ # Any assets that are used by the app should be placed here
-├─ src/
-│  ├─ main.rs # main.rs is the entry point to your application and currently contains all components for the app
-├─ Cargo.toml # The Cargo.toml file defines the dependencies and feature flags for your project
-```
+A data usage monitor for WindTre mobile plans, built with Rust and Dioxus.
+Works by sending SMS from a MikroTik router to fetch data usage status messages.
 
-### Tailwind
+99% vibe coded with GPT-5 🙈
+
+![Screenshot](./docs/screenshot.png)
+
+### Develop
+
+#### Tailwind
 1. Install npm: https://docs.npmjs.com/downloading-and-installing-node-js-and-npm
 2. Install the Tailwind CSS CLI: https://tailwindcss.com/docs/installation
 3. Run the following command in the root of the project to start the Tailwind CSS compiler:
@@ -17,8 +18,7 @@ project/
 npx tailwindcss -i ./tailwind.css -o ./assets/tailwind.css --watch
 ```
 
-### Serving Your App
-
+#### Run dev server
 Run the following command in the root of your project to start developing with the default platform:
 
 ```bash
@@ -28,20 +28,6 @@ dx serve --platform web
 ## Commands (server feature)
 
 This project also exposes a couple of CLI commands when built with the `server` feature. These commands interact with a local SQLite database and, for `import-sms`, a MikroTik router.
-
-### Build with server feature
-
-```bash
-cargo build --no-default-features --features server
-```
-
-The compiled binary will be at `target/debug/trullo-rs`.
-
-### Database location
-
-By default (when `DATABASE_URL` isn’t set), the app stores data in `data/data.db` under the project root. The URL used internally is of the form `sqlite:///abs/path/to/data.db?mode=rwc`. The `data/` directory is created automatically if it doesn’t exist.
-
-You can override the database location by setting `DATABASE_URL` (e.g., `sqlite:///absolute/path/to/your.db?mode=rwc`) in your environment or a `.env` file.
 
 ### Environment variables for MikroTik (import-sms)
 
@@ -84,3 +70,25 @@ MIKROTIK_PASSWORD=yourpassword
 Tips:
 - Both commands respect a `.env` file in the project root (via `dotenvy`).
 - Run with `RUST_LOG` or check stderr for progress messages.
+
+
+## release
+
+### docker
+```bash
+podman build -t trullo-rs .
+```
+
+### direct
+
+Build the server and client bundle
+
+```bash
+dx bundle --platform web --release 
+```
+
+Setting the arch or compiling for another target is not supported.
+
+```bash
+MIKROTIK_URL=http://192.168.88.1 MIKROTIK_USER=admin MIKROTIK_PASSWORD=password DATABASE_URL=/home/ubuntu/trullo-rs/data.db IP=0.0.0.0  ./trullo-rs --port 8080
+```
