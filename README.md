@@ -79,6 +79,19 @@ Tips:
 podman build -t trullo-rs .
 ```
 
+#### builx
+```bash
+docker buildx build --platform linux/arm64 -t trullo-rs:arm64 .
+
+scp trullo-rs_arm64.tar.gz ubuntu@pi:/tmp/
+ssh ubuntu@pi
+gunzip -c /tmp/trullo-rs_arm64.tar.gz | sudo podman load
+sudo podman tag docker.io/library/trullo-rs:arm64 localhost/trullo-rs:latest
+# or
+docker save trullo-rs:arm64 | ssh ubuntu@pi 'sudo podman load'
+```
+
+
 ### direct
 
 Build the server and client bundle
