@@ -24,7 +24,7 @@ fn parse_sms_message(message: &str, date_time: DateTime<Utc>) -> Option<DataStat
     let remaining_percentage: i32 = caps.get(1)?.as_str().parse().ok()?;
     let total_gb_str = caps.get(2)?.as_str().replace(',', ".");
     let total_gb: f64 = total_gb_str.parse().ok()?;
-    let total_mb = (total_gb * 1024.0).round() as i32;
+    let total_mb = (total_gb * 1000.0).round() as i32;
     let remaining_data_mb =
         ((remaining_percentage as f64 / 100.0) * total_mb as f64).round() as i32;
 
