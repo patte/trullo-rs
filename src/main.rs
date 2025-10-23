@@ -9,7 +9,7 @@ mod utils;
 #[cfg(feature = "server")]
 mod backend;
 
-pub const FAVICON: Asset = asset!("/assets/favicon.ico");
+pub const FAVICON: Asset = asset!("/assets/favicon.png");
 pub const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 #[cfg(feature = "server")]
